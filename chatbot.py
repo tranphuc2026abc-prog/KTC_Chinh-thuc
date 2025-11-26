@@ -23,7 +23,7 @@ MODEL_NAME = 'llama-3.1-8b-instant'
 PDF_DIR = "./PDF_KNOWLEDGE"
 LOGO_PATH = "LOGO.jpg" 
 
-# --- 2. CSS TÙY CHỈNH GIAO DIỆN ---
+# --- 2. CSS TÙY CHỈNH GIAO DIỆN (GIỮ NGUYÊN) ---
 st.markdown("""
 <style>
     /* 1. Nền chính */
@@ -138,7 +138,7 @@ def initialize_vector_db():
     if not pdf_files:
         return None
 
-    with st.spinner('🔄 Đang khởi tạo bộ não...'):
+    with st.spinner('🔄 Đang khởi tạo bộ não (Đọc tài liệu Anh/Việt)...'):
         documents = []
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
@@ -155,17 +155,20 @@ def initialize_vector_db():
             except Exception: pass
 
         if not documents: return None
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
+        # <--- THAY ĐỔI QUAN TRỌNG 1: Dùng Model Multilingual (Đa ngôn ngữ) --->
+        # Model này giúp map câu hỏi tiếng Việt vào tài liệu tiếng Anh chính xác hơn
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         return FAISS.from_documents(documents, embeddings)
 
 # --- KHỞI TẠO STATE ---
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Mình là Chatbot KTC 🤖. Mình có thể giúp gì cho bạn về môn Tin học hôm nay?"}]
+    st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Mình là Chatbot KTC 🤖. Mình có thể đọc tài liệu tiếng Anh và giải thích bằng tiếng Việt cho bạn!"}]
 
 if "vector_db" not in st.session_state:
     st.session_state.vector_db = initialize_vector_db()
 
-# --- 4. SIDEBAR (ĐÃ SỬA LỖI HTML) ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
@@ -180,12 +183,10 @@ with st.sidebar:
     
     # Trạng thái
     if st.session_state.vector_db:
-        st.markdown("💾 Dữ liệu SGK: <span style='color:green; font-weight:bold'>● Đã kết nối</span>", unsafe_allow_html=True)
+        st.markdown("💾 Dữ liệu: <span style='color:green; font-weight:bold'>● Đã kết nối (Đa ngữ)</span>", unsafe_allow_html=True)
     else:
-        st.markdown("💾 Dữ liệu SGK: <span style='color:red; font-weight:bold'>● Chưa nạp</span>", unsafe_allow_html=True)
+        st.markdown("💾 Dữ liệu: <span style='color:red; font-weight:bold'>● Chưa nạp</span>", unsafe_allow_html=True)
         
-    # --- PHẦN SỬA LỖI HIỂN THỊ HTML ---
-    # Tôi đã đưa chuỗi HTML về sát lề trái để tránh lỗi thụt đầu dòng (Indentation Error)
     html_info = """
 <div class="author-box">
     <div class="author-header">🏫 Sản phẩm KHKT</div>
@@ -211,7 +212,7 @@ col1, col2, col3 = st.columns([1, 8, 1])
 
 with col2:
     st.markdown('<h1 class="gradient-text">CHATBOT HỖ TRỢ HỌC TẬP KTC</h1>', unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center; color: #64748b; font-style: italic; margin-bottom: 30px;'>🚀 Ứng dụng AI hỗ trợ tra cứu kiến thức Tin học chương trình GDPT 2018</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #64748b; font-style: italic; margin-bottom: 30px;'>🚀 Hỗ trợ tra cứu tài liệu Tin học (Anh/Việt)</p>", unsafe_allow_html=True)
     
     for message in st.session_state.messages:
         avatar = "🧑‍🎓" if message["role"] == "user" else "🤖"
@@ -228,21 +229,38 @@ with col2:
         context_text = ""
         sources_list = []
         if st.session_state.vector_db:
-            results = st.session_state.vector_db.similarity_search(prompt, k=3)
+            # Tìm kiếm top 4 đoạn văn bản phù hợp nhất (tăng lên 4 để lấy nhiều ngữ cảnh hơn)
+            results = st.session_state.vector_db.similarity_search(prompt, k=4)
             for doc in results:
-                context_text += f"\n---\nNội dung: {doc.page_content}\nNguồn: {doc.metadata['source']} (Trang {doc.metadata['page']})"
+                context_text += f"\n---\nNội dung (Gốc): {doc.page_content}\nNguồn: {doc.metadata['source']} (Trang {doc.metadata['page']})"
                 sources_list.append(f"{doc.metadata['source']} - Tr. {doc.metadata['page']}")
 
-        SYSTEM_PROMPT = """Bạn là "Chatbot KTC", trợ lý ảo chuyên gia Tin học. Trả lời dựa trên SGK. Luôn trích dẫn nguồn."""
-        final_prompt = f"{SYSTEM_PROMPT}\n--- BỐI CẢNH SGK ---\n{context_text}\n--- CÂU HỎI ---\n{prompt}"
+        # <--- THAY ĐỔI QUAN TRỌNG 2: Prompt Engineering ép buộc trả lời tiếng Việt --->
+        SYSTEM_PROMPT = """
+        Bạn là "Chatbot KTC", trợ lý ảo chuyên gia Tin học của thầy Khanh và các bạn học sinh.
+        
+        NHIỆM VỤ CỦA BẠN:
+        1. Trả lời câu hỏi dựa trên "BỐI CẢNH ĐƯỢC CUNG CẤP" bên dưới.
+        2. Bối cảnh có thể là TIẾNG ANH hoặc TIẾNG VIỆT. 
+        3. BẮT BUỘC: Bạn phải suy luận, dịch và trả lời hoàn toàn bằng TIẾNG VIỆT một cách tự nhiên, dễ hiểu.
+        4. Nếu bối cảnh là tiếng Anh, hãy dịch ý chính sang tiếng Việt chuẩn thuật ngữ Tin học.
+        5. Luôn giữ thái độ thân thiện, khuyến khích học tập.
+        """
+        
+        final_prompt = f"{SYSTEM_PROMPT}\n\n--- BỐI CẢNH ĐƯỢC CUNG CẤP ---\n{context_text}\n\n--- CÂU HỎI CỦA HỌC SINH ---\n{prompt}"
 
         with st.chat_message("assistant", avatar="🤖"):
             placeholder = st.empty()
             full_response = ""
             try:
                 chat_completion = client.chat.completions.create(
-                    messages=[{"role": "system", "content": final_prompt}, {"role": "user", "content": prompt}],
-                    model=MODEL_NAME, stream=True, temperature=0.3
+                    messages=[
+                        {"role": "system", "content": final_prompt}, # Dùng prompt mới
+                        {"role": "user", "content": prompt}
+                    ],
+                    model=MODEL_NAME, 
+                    stream=True, 
+                    temperature=0.3 # Giữ nhiệt độ thấp để bot bám sát tài liệu
                 )
 
                 for chunk in chat_completion:
@@ -260,6 +278,6 @@ with col2:
 
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
             except Exception as e:
-                st.error(f"Lỗi: {e}")
+                st.error(f"Lỗi kết nối: {e}")
 
-    st.markdown('<div class="footer-note">⚠️ Lưu ý: AI có thể mắc lỗi. Vui lòng kiểm tra lại thông tin quan trọng với SGK.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="footer-note">⚠️ Lưu ý: AI trả lời dựa trên tài liệu được cung cấp.</div>', unsafe_allow_html=True)
