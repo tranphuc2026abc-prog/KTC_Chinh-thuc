@@ -1,17 +1,9 @@
 import streamlit as st
-from groq import Groq
 import os
 import glob
 import time
-from pypdf import PdfReader
 
-# --- LIBRARY AI & RAG ---
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
-
-# --- 1. CẤU HÌNH HỆ THỐNG & HẰNG SỐ ---
+# --- CẤU HÌNH TRANG (Phải để đầu tiên) ---
 st.set_page_config(
     page_title="KTC Assistant - Trợ lý Tin học 2025",
     page_icon="🧠",
@@ -19,13 +11,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- LIBRARY AI & RAG ---
+# (Đặt trong try-except để bắt lỗi nếu server chưa cài thư viện)
+try:
+    from groq import Groq
+    from pypdf import PdfReader
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_core.documents import Document
+except ImportError as e:
+    st.error(f"⚠️ Lỗi thư viện: {e}")
+    st.info("Thầy hãy kiểm tra xem file requirements.txt đã có đầy đủ các thư viện chưa nhé (langchain, faiss-cpu, groq...).")
+    st.stop()
+
+# --- 1. CẤU HÌNH HỆ THỐNG & HẰNG SỐ ---
 CONSTANTS = {
     "MODEL_NAME": 'llama-3.1-8b-instant',
-    "PDF_DIR": "./PDF_KNOWLEDGE",
-    "VECTOR_STORE_PATH": "./faiss_db_index", # Nơi lưu bộ não vĩnh viễn
+    "PDF_DIR": "PDF_KNOWLEDGE",  # Tên thư mục chứa PDF trên GitHub
+    "VECTOR_STORE_PATH": "faiss_db_index", # Nơi lưu bộ não vĩnh viễn
     "LOGO_PATH": "LOGO.jpg",
     "EMBEDDING_MODEL": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", # Tốt hơn cho tiếng Việt
-    "CHUNK_SIZE": 800, # Giảm chunk size để nội dung cô đọng hơn
+    "CHUNK_SIZE": 800, 
     "CHUNK_OVERLAP": 150
 }
 
@@ -34,17 +41,28 @@ class KnowledgeBase:
     """Class quản lý việc đọc, xử lý và truy xuất dữ liệu kiến thức."""
     
     def __init__(self):
-        self.embeddings = HuggingFaceEmbeddings(model_name=CONSTANTS["EMBEDDING_MODEL"])
+        # Dùng cache để không phải load model nhiều lần
+        self.embeddings = self._load_embedding_model()
+
+    @st.cache_resource
+    def _load_embedding_model(_self):
+        return HuggingFaceEmbeddings(model_name=CONSTANTS["EMBEDDING_MODEL"])
 
     def load_documents(self):
         """Đọc PDF từ thư mục."""
         if not os.path.exists(CONSTANTS["PDF_DIR"]):
-            os.makedirs(CONSTANTS["PDF_DIR"])
+            # Nếu chưa có thư mục thì tạo (để tránh lỗi), dù trên GitHub phải tự tạo
+            os.makedirs(CONSTANTS["PDF_DIR"], exist_ok=True)
             return []
         
-        pdf_files = glob.glob(os.path.join(CONSTANTS["PDF_DIR"], "*.pdf"))
+        # Tìm tất cả file PDF (hỗ trợ cả chữ hoa chữ thường)
+        pdf_files = glob.glob(os.path.join(CONSTANTS["PDF_DIR"], "*.[pP][dD][fF]"))
         documents = []
         
+        if not pdf_files:
+            st.warning(f"⚠️ Chưa tìm thấy file PDF nào trong thư mục '{CONSTANTS['PDF_DIR']}'.")
+            return []
+
         for pdf_path in pdf_files:
             try:
                 reader = PdfReader(pdf_path)
@@ -64,8 +82,8 @@ class KnowledgeBase:
         """
         Cơ chế thông minh:
         1. Kiểm tra xem đã có Database lưu trên ổ cứng chưa.
-        2. Nếu có -> Load lên (mất 1 giây).
-        3. Nếu chưa hoặc user ép buộc -> Xây dựng lại (mất nhiều thời gian).
+        2. Nếu có -> Load lên.
+        3. Nếu chưa hoặc user ép buộc -> Xây dựng lại.
         """
         if os.path.exists(CONSTANTS["VECTOR_STORE_PATH"]) and not force_rebuild:
             try:
@@ -99,7 +117,7 @@ class KnowledgeBase:
 
 # --- 3. GIAO DIỆN & LOGIC CHÍNH ---
 
-# CSS Tinh chỉnh (Giữ nguyên style đẹp của thầy, tối ưu thêm font)
+# CSS Tinh chỉnh
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
@@ -133,10 +151,14 @@ st.markdown("""
 
 # Khởi tạo kết nối Groq
 try:
-    api_key = st.secrets["GROQ_API_KEY"]
+    # Ưu tiên lấy từ secrets của Streamlit, nếu không có thì lấy từ biến môi trường
+    api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        st.error("⚠️ Chưa cấu hình API Key. Vui lòng vào Settings -> Secrets trên Streamlit Cloud để thêm 'GROQ_API_KEY'.")
+        st.stop()
     client = Groq(api_key=api_key)
-except Exception:
-    st.error("⚠️ Lỗi hệ thống: Chưa cấu hình API Key. Vui lòng kiểm tra secrets.toml")
+except Exception as e:
+    st.error(f"⚠️ Lỗi khởi tạo Groq: {e}")
     st.stop()
 
 # Khởi tạo Session State
@@ -179,7 +201,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    # Author Info (Giữ nguyên format của thầy)
+    # Author Info
     st.markdown("""
     <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px dashed #ccc; margin-top:20px;">
         <div style="font-weight:bold; color:#0052cc; font-size:0.9rem;">🚀 DỰ ÁN KHKT 2025-2026</div>
@@ -223,7 +245,7 @@ with col2:
                     context_text += f"\n[Nội dung trích xuất]: {doc.page_content}\n[Nguồn]: {doc.metadata.get('source')} - Trang {doc.metadata.get('page')}"
                     sources.append(f"{doc.metadata.get('source')} (Tr. {doc.metadata.get('page')})")
             
-            # Prompt Engineering Cao cấp (Instruction Tuning)
+            # Prompt Engineering Cao cấp
             SYSTEM_PROMPT = f"""
             Bạn là trợ lý ảo KTC, chuyên gia về môn Tin học GDPT 2018.
             NHIỆM VỤ: Trả lời câu hỏi dựa trên thông tin được cung cấp dưới đây.
@@ -242,12 +264,11 @@ with col2:
                 stream = client.chat.completions.create(
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        # Gửi kèm vài tin nhắn cũ để AI hiểu ngữ cảnh (Context Window)
                         *st.session_state.messages[-4:], 
                     ],
                     model=CONSTANTS["MODEL_NAME"],
                     stream=True,
-                    temperature=0.3, # Giữ nhiệt độ thấp để câu trả lời chính xác theo sách
+                    temperature=0.3,
                     max_tokens=1024
                 )
 
@@ -257,7 +278,7 @@ with col2:
                         full_response += content
                         message_placeholder.markdown(full_response + "▌")
                 
-                # Hiển thị nguồn tài liệu (Trích dẫn khoa học)
+                # Hiển thị nguồn tài liệu
                 if sources:
                     unique_sources = list(set(sources))
                     source_html = "<div class='source-box'>📚 <b>Nguồn tham khảo xác thực:</b><br>" + "<br>".join([f"• {s}" for s in unique_sources]) + "</div>"
