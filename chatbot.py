@@ -6,14 +6,15 @@ import streamlit as st
 # --- Imports tối ưu & Xử lý lỗi thư viện ---
 try:
     from pypdf import PdfReader
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    # SỬA LỖI: Dùng thư viện mới langchain_text_splitters
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
     from groq import Groq
 except ImportError as e:
-    st.error(f"❌ Lỗi thư viện: {e}. Vui lòng kiểm tra file requirements.txt")
+    st.error(f"❌ Lỗi thư viện: {e}. Vui lòng kiểm tra file requirements.txt và chạy 'pip install -r requirements.txt'")
     st.stop()
 
 # ==============================================================================
@@ -29,21 +30,17 @@ st.set_page_config(
 
 class AppConfig:
     """Cấu hình trung tâm cho ứng dụng."""
-    # Model AI
     LLM_MODEL = 'llama-3.1-8b-instant'
-    # Embedding nhẹ, tối ưu cho CPU
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     TRANSLATION_MODEL = "Helsinki-NLP/opus-mt-vi-en"
     
-    # Đường dẫn
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
     LOGO_PATH = "LOGO.jpg"
     
-    # Tham số RAG
     CHUNK_SIZE = 1000 
     CHUNK_OVERLAP = 200
-    TOP_K_RETRIEVAL = 4 # Giảm xuống 4 để lấy ngữ cảnh chắt lọc nhất
+    TOP_K_RETRIEVAL = 4
 
 # ==============================================================================
 # 2. UI/UX: GIAO DIỆN & CSS
@@ -52,14 +49,12 @@ class AppConfig:
 def inject_custom_css():
     st.markdown("""
     <style>
-        /* Import Font đẹp */
         @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
         
         html, body, [class*="css"] {
             font-family: 'Roboto', sans-serif;
         }
 
-        /* Header Gradient */
         .main-header {
             background: linear-gradient(90deg, #005C97 0%, #363795 100%);
             padding: 1.5rem;
@@ -81,7 +76,6 @@ def inject_custom_css():
             font-size: 1.1rem;
         }
 
-        /* Sidebar Styling */
         [data-testid="stSidebar"] {
             background-color: #f8f9fa;
         }
@@ -100,12 +94,10 @@ def inject_custom_css():
             font-weight: bold;
         }
         
-        /* Chat Message Styling */
         .stChatMessage {
             border-radius: 10px;
             border: 1px solid #f0f2f6;
         }
-        /* User Avatar Wrapper */
         .stChatMessage[data-testid="stChatMessage"]:nth-child(odd) {
              background-color: #f0f7ff;
         }
@@ -118,7 +110,6 @@ def inject_custom_css():
 
 @st.cache_resource(show_spinner=False)
 def load_groq_client():
-    """Khởi tạo Groq Client (Cache trọn đời phiên chạy)."""
     api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
         return None
@@ -126,7 +117,6 @@ def load_groq_client():
 
 @st.cache_resource(show_spinner=False)
 def load_embedding_model():
-    """Load model Vector hóa (Nặng -> Cache)."""
     try:
         return HuggingFaceEmbeddings(model_name=AppConfig.EMBEDDING_MODEL)
     except Exception:
@@ -134,7 +124,6 @@ def load_embedding_model():
 
 @st.cache_resource(show_spinner=False)
 def load_translator():
-    """Load model Dịch thuật (Rất nặng -> Cache kỹ)."""
     try:
         tokenizer = AutoTokenizer.from_pretrained(AppConfig.TRANSLATION_MODEL)
         model = AutoModelForSeq2SeqLM.from_pretrained(AppConfig.TRANSLATION_MODEL)
@@ -144,7 +133,6 @@ def load_translator():
 
 @st.cache_data(show_spinner=False)
 def load_and_process_pdfs(pdf_dir):
-    """Đọc PDF và chia nhỏ văn bản (Cache data đầu ra)."""
     docs = []
     if not os.path.exists(pdf_dir):
         return docs
@@ -164,7 +152,6 @@ def load_and_process_pdfs(pdf_dir):
         except Exception:
             continue
             
-    # Split text
     if docs:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=AppConfig.CHUNK_SIZE,
@@ -182,11 +169,9 @@ class KnowledgeBase:
         self.embeddings = load_embedding_model()
 
     def get_vector_store(self):
-        """Lấy Vector Store: Ưu tiên load từ ổ cứng, nếu không có thì tạo mới."""
         if not self.embeddings:
             return None
 
-        # 1. Thử load từ Disk
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 return FAISS.load_local(
@@ -197,7 +182,6 @@ class KnowledgeBase:
             except Exception:
                 st.toast("⚠️ Database cũ lỗi, đang tạo mới...", icon="🔄")
         
-        # 2. Tạo mới nếu cần
         return self._create_new_db()
 
     def _create_new_db(self):
@@ -214,24 +198,19 @@ class KnowledgeBase:
             return None
 
 def translate_query(text, translator):
-    """Dịch câu hỏi sang tiếng Anh (nếu model đã load)."""
     if not translator: 
         return text
     try:
-        # Giới hạn ký tự để tránh lỗi model
         result = translator(text[:500])
         return result[0]['translation_text'] if result else text
     except Exception:
         return text
 
 def get_context(vector_db, query):
-    """Tìm kiếm thông tin liên quan."""
     if not vector_db:
         return "", []
     try:
-        # Similarity search
         results = vector_db.similarity_search(query, k=AppConfig.TOP_K_RETRIEVAL)
-        
         context_text = ""
         sources = []
         
@@ -243,12 +222,11 @@ def get_context(vector_db, query):
             context_text += f"\n[Nguồn: {src} - Tr.{page}]: {content}"
             sources.append(f"{src} (Trang {page})")
             
-        return context_text, list(set(sources)) # Unique sources
+        return context_text, list(set(sources))
     except Exception:
         return "", []
 
 def generate_stream(client, context, question):
-    """Tạo response stream từ Groq."""
     system_prompt = f"""
     Bạn là KTC Assistant - Trợ lý ảo hỗ trợ học tập và nghiên cứu khoa học.
     
@@ -287,7 +265,6 @@ def generate_stream(client, context, question):
 def main():
     inject_custom_css()
     
-    # --- Sidebar ---
     with st.sidebar:
         if os.path.exists(AppConfig.LOGO_PATH):
             st.image(AppConfig.LOGO_PATH, use_container_width=True)
@@ -296,7 +273,6 @@ def main():
 
         st.markdown("---")
         
-        # Thông tin dự án (Update theo yêu cầu của Thầy)
         st.markdown("""
         <div class="sidebar-card">
             <h4>🏆 SẢN PHẨM DỰ THI KHKT<br>CẤP TRƯỜNG</h4>
@@ -315,7 +291,6 @@ def main():
             st.session_state.messages = []
             st.rerun()
 
-    # --- Header ---
     st.markdown("""
     <div class="main-header">
         <h1>🎓 TRỢ LÝ ẢO KTC AI</h1>
@@ -323,53 +298,41 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # --- Init State ---
     if "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "assistant", "content": "Chào bạn! Mình là trợ lý ảo KTC. Mình có thể giúp gì cho dự án KHKT của bạn hôm nay?"}
         ]
 
-    # --- Load Resources ---
     groq_client = load_groq_client()
     translator = load_translator()
     
-    # Load DB (Silent)
     if "vector_db" not in st.session_state:
         kb = KnowledgeBase()
         st.session_state.vector_db = kb.get_vector_store()
 
-    # Check API Key
     if not groq_client:
         st.warning("⚠️ Chưa cấu hình GROQ_API_KEY. Vui lòng kiểm tra secrets.toml")
         st.stop()
 
-    # --- Chat Interface ---
     for msg in st.session_state.messages:
         avatar = "🧑‍🎓" if msg["role"] == "user" else "🤖"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # --- Input Processing ---
     if prompt := st.chat_input("Nhập câu hỏi của bạn tại đây..."):
-        # Hiển thị câu hỏi User
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar="🧑‍🎓"):
             st.markdown(prompt)
 
-        # Xử lý AI
         with st.chat_message("assistant", avatar="🤖"):
             response_container = st.empty()
             
-            # Quy trình xử lý (Hiển thị trạng thái đẹp)
             with st.status("🚀 Đang xử lý...", expanded=True) as status:
-                
-                # 1. Dịch thuật
                 search_query = prompt
                 if translator:
                     st.write("🌍 Đang tối ưu hóa câu hỏi (Dịch Việt -> Anh)...")
                     search_query = translate_query(prompt, translator)
                 
-                # 2. RAG Retrieval
                 st.write("📚 Đang tra cứu tài liệu chuyên ngành...")
                 context, sources = get_context(st.session_state.vector_db, search_query)
                 
@@ -380,7 +343,6 @@ def main():
                 
                 status.update(label="✅ Đã xong!", state="complete", expanded=False)
 
-            # 3. Stream Response
             full_response = ""
             stream = generate_stream(groq_client, context, prompt)
             
@@ -390,13 +352,11 @@ def main():
             
             response_container.markdown(full_response)
             
-            # Hiển thị nguồn tham khảo (Nếu có)
             if sources:
                 with st.expander("📖 Xem nguồn tài liệu tham khảo"):
                     for src in sources:
                         st.caption(f"• {src}")
 
-            # Lưu lịch sử
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 if __name__ == "__main__":
