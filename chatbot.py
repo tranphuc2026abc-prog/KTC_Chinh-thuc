@@ -6,7 +6,6 @@ import streamlit as st
 # --- Imports tối ưu & Xử lý lỗi thư viện ---
 try:
     from pypdf import PdfReader
-    # SỬA LỖI: Dùng thư viện mới langchain_text_splitters
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_huggingface import HuggingFaceEmbeddings
@@ -267,7 +266,8 @@ def main():
     
     with st.sidebar:
         if os.path.exists(AppConfig.LOGO_PATH):
-            st.image(AppConfig.LOGO_PATH, use_container_width=True)
+            # SỬA: Bỏ use_container_width để tránh warning
+            st.image(AppConfig.LOGO_PATH) 
         else:
             st.header("🤖 KTC AI")
 

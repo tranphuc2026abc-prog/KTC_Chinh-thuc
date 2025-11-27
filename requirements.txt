@@ -12,3 +12,4 @@ torch
 groq
 watchdog
 numpy<2.0.0
+sentencepiece
