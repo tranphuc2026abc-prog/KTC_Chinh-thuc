@@ -1,9 +1,12 @@
 streamlit
 groq
+pdfplumber
 pypdf
 langchain
 langchain-community
 langchain-huggingface
-faiss-cpu
+langchain-text-splitters
+langchain-core
+scikit-learn
 sentence-transformers
 huggingface-hub

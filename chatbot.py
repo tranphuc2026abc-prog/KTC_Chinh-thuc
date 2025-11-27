@@ -5,8 +5,9 @@ import glob
 import time
 from pypdf import PdfReader
 
-# --- LIBRARY AI & RAG ---
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# --- LIBRARY AI & RAG (ĐÃ SỬA LỖI IMPORT) ---
+# Thay đổi từ langchain.text_splitter sang langchain_text_splitters
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
