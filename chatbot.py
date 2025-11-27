@@ -3,7 +3,7 @@ import os
 import glob
 import sys
 
-# --- 1. CẤU HÌNH TRANG (BẮT BUỘC PHẢI ĐỂ ĐẦU TIÊN) ---
+# --- 1. CẤU HÌNH TRANG ---
 st.set_page_config(
     page_title="Chatbot KTC - Trợ lý Tin học",
     page_icon="🤖",
@@ -12,12 +12,12 @@ st.set_page_config(
 )
 
 # --- 2. KIỂM TRA MÔI TRƯỜNG (SAFE MODE) ---
-# Đoạn này giúp App không bị sập nguồn nếu thiếu thư viện
 try:
     from groq import Groq
     import pdfplumber
     from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.vectorstores import FAISS
+    # THAY ĐỔI QUAN TRỌNG: Dùng SKLearn thay vì FAISS
+    from langchain_community.vectorstores import SKLearnVectorStore
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     LIBRARIES_OK = True
@@ -25,18 +25,14 @@ except ImportError as e:
     LIBRARIES_OK = False
     ERROR_DETAIL = str(e)
 
-# --- 3. GIAO DIỆN BÁO LỖI (NẾU CÓ) ---
+# --- 3. GIAO DIỆN BÁO LỖI ---
 if not LIBRARIES_OK:
     st.markdown("<h1 style='text-align: center; color: red;'>⚠️ HỆ THỐNG ĐANG THIẾU THƯ VIỆN</h1>", unsafe_allow_html=True)
     st.error(f"Lỗi cụ thể: {ERROR_DETAIL}")
-    st.warning("👉 Thầy Khanh hãy kiểm tra lại file 'requirements.txt' trên Github.")
-    st.info(f"Phiên bản Python đang chạy: {sys.version}")
-    st.stop() # Dừng lại tại đây, không chạy tiếp để tránh sập app
+    st.warning("👉 Thầy hãy chắc chắn file 'requirements.txt' đã có dòng 'scikit-learn' chưa nhé.")
+    st.stop()
 
-# =========================================================
-# NẾU MỌI THỨ ỔN, CODE CHÍNH SẼ CHẠY TỪ ĐÂY
-# =========================================================
-
+# --- 4. CODE CHÍNH ---
 # --- CÁC HẰNG SỐ ---
 MODEL_NAME = 'llama-3.1-8b-instant'
 PDF_DIR = "./PDF_KNOWLEDGE"
@@ -73,6 +69,7 @@ except Exception:
 client = Groq(api_key=api_key)
 
 # --- HÀM LOAD DATA ---
+@st.cache_resource(show_spinner=False)
 def load_data():
     if not os.path.exists(PDF_DIR):
         os.makedirs(PDF_DIR)
@@ -85,11 +82,11 @@ def load_data():
     documents = []
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
-    progress_text = "Đang nạp dữ liệu chi tiết (pdfplumber)..."
-    my_bar = st.progress(0, text=progress_text)
+    # Dùng st.empty để hiện tiến trình mà không làm chậm app
+    status_text = st.empty()
+    status_text.text("Đang khởi động bộ não AI...")
     
-    total_files = len(pdf_files)
-    for idx, pdf_path in enumerate(pdf_files):
+    for pdf_path in pdf_files:
         file_name = os.path.basename(pdf_path)
         try:
             with pdfplumber.open(pdf_path) as pdf:
@@ -100,25 +97,22 @@ def load_data():
                         chunks = text_splitter.split_text(text)
                         for chunk in chunks:
                             documents.append(Document(page_content=chunk, metadata={"source": file_name, "page": i + 1}))
-        except Exception as e:
-            print(f"Lỗi đọc file {file_name}: {e}")
+        except Exception: pass
             
-        my_bar.progress((idx + 1) / total_files, text=f"Đang xử lý: {file_name}")
-
-    my_bar.empty()
+    status_text.empty()
     
     if not documents: return None
     
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    return FAISS.from_documents(documents, embeddings)
+    # SỬ DỤNG SKLEARN VECTOR STORE (BỀN BỈ HƠN FAISS)
+    return SKLearnVectorStore.from_documents(documents=documents, embedding=embeddings)
 
 # --- KHỞI TẠO STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Chatbot KTC đã sẵn sàng. Hãy hỏi về HTML, AI, Python... nhé!"}]
 
 if "vector_db" not in st.session_state:
-    with st.spinner("🔄 Đang khởi tạo bộ não lần đầu..."):
-        st.session_state.vector_db = load_data()
+    st.session_state.vector_db = load_data()
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -127,32 +121,21 @@ with st.sidebar:
     
     st.markdown("<h3 style='text-align: center; color: #0f4c81;'>TRỢ LÝ KTC</h3>", unsafe_allow_html=True)
     
+    # Check nếu vector_db có dữ liệu (SKLearn store không có thuộc tính index.ntotal trực tiếp nên ta check kiểu khác)
     if st.session_state.vector_db:
-        num_vectors = st.session_state.vector_db.index.ntotal
-        st.success(f"🟢 Đã học: {num_vectors} đoạn kiến thức")
+        st.success(f"🟢 Trạng thái: Đã kết nối tri thức")
     else:
         st.error("🔴 Chưa có dữ liệu")
 
     st.markdown("---")
     
-    if st.button("🔄 Nạp lại dữ liệu gốc (Force Reload)", use_container_width=True):
-        st.session_state.vector_db = None 
+    if st.button("🔄 Nạp lại dữ liệu gốc", use_container_width=True):
+        st.cache_resource.clear()
         st.rerun() 
         
     if st.button("🧹 Làm mới hội thoại", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-
-    with st.expander("🕵️ Soi dữ liệu (Debug)"):
-        st.write("Dán câu hỏi vào đây để xem máy tìm thấy đoạn nào:")
-        debug_query = st.text_input("Câu hỏi test", "HTML là gì")
-        if st.button("Kiểm tra tìm kiếm") and st.session_state.vector_db:
-            docs = st.session_state.vector_db.similarity_search_with_score(debug_query, k=4)
-            for doc, score in docs:
-                score_color = "green" if score < 1.5 else "red"
-                st.markdown(f"**Score:** :{score_color}[{score:.3f}]")
-                st.info(doc.page_content)
-                st.write("---")
 
     st.markdown("<div style='margin-top: 20px; font-size: 0.8rem; color: grey'>Sản phẩm KHKT - THCS & THPT Phạm Kiệt</div>", unsafe_allow_html=True)
 
@@ -179,9 +162,13 @@ with col2:
         relevant_docs = []
 
         if st.session_state.vector_db:
+            # SKLearn trả về kết quả tương tự FAISS
             results_with_score = st.session_state.vector_db.similarity_search_with_score(prompt, k=TOP_K_RETRIEVAL)
             for doc, score in results_with_score:
-                if score < SIMILARITY_THRESHOLD: 
+                # Lưu ý: SKLearn score là cosine similarity (càng cao càng tốt, max là 1.0)
+                # Nên ta phải đổi logic một chút: Lấy những cái có độ tương đồng > 0.3 (ví dụ)
+                # Hoặc đơn giản là lấy top kết quả tốt nhất
+                if score > 0.3: 
                     context_text += f"\n---\n[Nguồn: {doc.metadata['source']} - Tr.{doc.metadata['page']}]\nNội dung: {doc.page_content}"
                     relevant_docs.append(doc)
         
@@ -221,7 +208,7 @@ with col2:
                 placeholder.markdown(full_response)
                 
                 if relevant_docs:
-                    with st.expander("📚 Minh chứng từ tài liệu (Click để xem)"):
+                    with st.expander("📚 Minh chứng từ tài liệu"):
                         for doc in relevant_docs:
                             st.markdown(f"**📄 {doc.metadata['source']} - Trang {doc.metadata['page']}**")
                             st.caption(doc.page_content[:300] + "...") 
