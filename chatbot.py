@@ -240,18 +240,23 @@ def retrieve_info(vector_db, query: str) -> Tuple[str, List[str]]:
         return "", []
 
 def generate_response_stream(client, context, question):
-    """Tạo câu trả lời từ LLM (Streaming)."""
-    # Prompt được tối ưu để chú ý đến lớp học
+    """Tạo câu trả lời từ LLM (Streaming) - Đã tối ưu cho câu hỏi tổng quan."""
+    
     system_prompt = f"""
     Bạn là KTC Assistant, một trợ lý giáo dục chuyên nghiệp.
     
-    QUY TẮC QUAN TRỌNG:
-    1. Nếu câu hỏi có nhắc đến LỚP cụ thể (Ví dụ: Tin 10, Tin 11, Tin 12), hãy ƯU TIÊN tìm kiếm và trả lời thông tin từ tài liệu của lớp đó trong [THÔNG TIN ĐƯỢC CUNG CẤP].
-    2. Nếu thông tin của lớp được hỏi không có trong dữ liệu, hãy nói rõ là chưa có thông tin của lớp đó.
-    3. Trả lời bằng tiếng Việt, giọng văn sư phạm, dễ hiểu.
-    4. Trình bày đẹp mắt (dùng Markdown, bullet points).
+    [QUY TRÌNH TƯ DUY VÀ TRẢ LỜI]:
+    1. Phân tích câu hỏi:
+       - Nếu là câu hỏi chi tiết (Ví dụ: "Hàm IF là gì?"): Chỉ dùng thông tin trong [DỮ LIỆU TRA CỨU] để trả lời chính xác.
+       - Nếu là câu hỏi TỔNG QUÁT/TÓM TẮT (Ví dụ: "Tóm tắt Tin 12", "Tin 10 học gì?"):
+         + Nếu [DỮ LIỆU TRA CỨU] quá ít hoặc chỉ nói về một phần nhỏ (ví dụ chỉ nói về đạo đức), bạn ĐƯỢC PHÉP dùng kiến thức chuẩn của mình về chương trình GDPT 2018 để khái quát nội dung chính (Liệt kê các chủ đề/Module chính).
+         + Sau đó dùng [DỮ LIỆU TRA CỨU] để trích dẫn chi tiết minh họa.
+    
+    2. Phong cách:
+       - Sư phạm, dễ hiểu, trình bày mạch lạc (dùng Markdown, gạch đầu dòng).
+       - Luôn trích dẫn nguồn nếu lấy từ tài liệu.
 
-    [THÔNG TIN ĐƯỢC CUNG CẤP TỪ TÀI LIỆU]:
+    [DỮ LIỆU TRA CỨU TỪ SÁCH GIÁO KHOA]:
     {context}
     """
     
@@ -263,12 +268,11 @@ def generate_response_stream(client, context, question):
                 {"role": "user", "content": question}
             ],
             stream=True,
-            temperature=0.3
+            temperature=0.5 # Tăng nhẹ độ sáng tạo để AI tổng hợp tốt hơn
         )
         return stream
     except Exception as e:
         return f"Lỗi kết nối AI: {str(e)}"
-
 # ==============================================================================
 # 6. MAIN APP LOOP (LOGO NHỎ & CÂN ĐỐI)
 # ==============================================================================
