@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.20.0
 groq
 langchain
 langchain-community
@@ -6,6 +6,6 @@ langchain-huggingface
 langchain-text-splitters
 pypdf
 faiss-cpu
-transformers
+transformers>=4.30.0
 sentence-transformers
 torch
