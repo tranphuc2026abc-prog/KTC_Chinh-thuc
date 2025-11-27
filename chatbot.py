@@ -50,7 +50,7 @@ class AppConfig:
     TOP_K_RETRIEVAL = 3
 
 # ==============================================================================
-# 2. GIAO DIỆN (CSS & STYLING)
+# 2. GIAO DIỆN (CSS & STYLING) - ĐÃ TỐI ƯU CHO GỌN
 # ==============================================================================
 
 def inject_custom_css():
@@ -62,53 +62,51 @@ def inject_custom_css():
             font-family: 'Inter', sans-serif;
         }
         
+        /* Thu gọn khoảng cách đầu trang để đỡ tốn diện tích */
+        .block-container {
+            padding-top: 2rem !important; 
+            padding-bottom: 2rem !important;
+        }
+        
         /* Header Styling */
         .main-header {
             background: linear-gradient(90deg, #0f4c81 0%, #00c6ff 100%);
-            padding: 20px;
+            padding: 15px; /* Giảm padding */
             border-radius: 10px;
             color: white;
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         .main-header h1 {
             margin: 0;
-            font-size: 2.5rem;
+            font-size: 2rem; /* Giảm cỡ chữ tiêu đề chút */
             font-weight: 700;
             color: white !important;
         }
         .main-header p {
-            font-size: 1.1rem;
+            font-size: 1rem;
             opacity: 0.9;
+            margin-bottom: 0px;
         }
 
-        /* Chat Message Styling */
-        .stChatMessage {
-            border-radius: 10px;
-            border: 1px solid #eee;
-            padding: 10px;
+        /* Sidebar Info - Làm gọn tối đa */
+        .project-info {
+            background-color: #f0f2f6;
+            padding: 10px; /* Giảm padding */
+            border-radius: 8px;
+            font-size: 0.85rem; /* Chữ nhỏ lại xíu cho gọn */
+            line-height: 1.4;
+            border-left: 4px solid #0f4c81;
             margin-bottom: 10px;
         }
         
-        /* Source Expander */
-        .streamlit-expanderHeader {
-            font-weight: 600;
-            color: #0f4c81;
-        }
-        
-        /* Sidebar Info */
-        .project-info {
-            background-color: #f0f2f6;
-            padding: 15px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            border-left: 4px solid #0f4c81;
-            margin-bottom: 20px;
+        /* Ẩn bớt khoảng trắng thừa mặc định của Streamlit Sidebar */
+        section[data-testid="stSidebar"] > div {
+            padding-top: 1rem;
         }
     </style>
     """, unsafe_allow_html=True)
-
 # ==============================================================================
 # 3. QUẢN LÝ TÀI NGUYÊN (CACHING RESOURCE)
 # ==============================================================================
@@ -270,7 +268,7 @@ def generate_response_stream(client, context, question):
         return f"Lỗi kết nối AI: {str(e)}"
 
 # ==============================================================================
-# 6. MAIN APP LOOP (CẬP NHẬT GIAO DIỆN MỚI)
+# 6. MAIN APP LOOP (LOGO NHỎ & CÂN ĐỐI)
 # ==============================================================================
 
 def main():
@@ -278,28 +276,29 @@ def main():
     
     # --- Cấu hình Sidebar ---
     with st.sidebar:
-        # 1. Hiển thị Logo: Để use_container_width=True để logo tự căn vừa vặn đẹp nhất
+        # 1. Xử lý Logo: Chia cột để logo nhỏ lại và nằm giữa (Tỷ lệ 1-3-1)
         if os.path.exists("LOGO.jpg"):
-            st.image("LOGO.jpg", use_container_width=True)
+            c1, c2, c3 = st.columns([1, 3, 1]) 
+            with c2: # Logo nằm ở cột giữa (chiếm khoảng 60% chiều rộng sidebar)
+                st.image("LOGO.jpg", use_container_width=True)
         else:
             st.title("🤖")
         
-        # 2. Thông tin dự án (Đã sửa nội dung)
+        st.write("") # Tạo khoảng cách nhỏ xíu dưới logo
+        
+        # 2. Thông tin dự án (Gọn gàng)
         st.markdown("""
         <div class="project-info">
-            <div style="text-align: center; font-weight: bold; margin-bottom: 5px;">
-                🏆 SẢN PHẨM DỰ THI KHKT CẤP TRƯỜNG
+            <div style="text-align: center; font-weight: bold; margin-bottom: 5px; color: #0f4c81;">
+                🏆 SẢN PHẨM DỰ THI<br>KHKT CẤP TRƯỜNG
             </div>
-            THCS & THPT Phạm Kiệt<br>
+            <b>THCS & THPT Phạm Kiệt</b><br>
             Tác giả: Bùi Tá Tùng & Cao Sỹ Bảo Chung<br>
             GVHD: Thầy Khanh
         </div>
         """, unsafe_allow_html=True)
         
         st.markdown("---")
-        st.subheader("⚙️ Điều khiển")
-        
-        # Đã xóa nút Cập nhật dữ liệu
         
         # Nút xóa lịch sử
         if st.button("🗑️ Xóa lịch sử chat", use_container_width=True, key="btn_clear"):
@@ -341,32 +340,26 @@ def main():
 
     # Xử lý Chat Input
     if prompt := st.chat_input("Nhập câu hỏi của bạn tại đây..."):
-        # 1. Hiển thị câu hỏi người dùng
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar="🧑‍🎓"):
             st.markdown(prompt)
 
-        # 2. Xử lý logic AI
         with st.chat_message("assistant", avatar="🤖"):
             message_placeholder = st.empty()
             
-            # Bước A: Dịch
             search_query = prompt
             if translator:
                 translated = translate_query(prompt, translator)
                 if translated and translated != prompt:
                     search_query = translated
 
-            # Bước B: Truy vấn RAG
             context_text, sources = retrieve_info(st.session_state.vector_db, search_query)
             
             if not context_text:
                 context_text = "Không tìm thấy thông tin cụ thể trong tài liệu. Trả lời dựa trên kiến thức chung."
 
-            # Bước C: Gọi LLM
             stream = generate_response_stream(groq_client, context_text, prompt)
             
-            # Bước D: Streaming phản hồi
             full_response = ""
             if isinstance(stream, str):
                 full_response = stream
@@ -378,13 +371,11 @@ def main():
                         message_placeholder.markdown(full_response + "▌")
                 message_placeholder.markdown(full_response)
 
-            # Bước E: Hiển thị nguồn
             if sources:
                 with st.expander("📚 Tài liệu tham khảo & Minh chứng"):
                     for src in sources:
                         st.markdown(f"- {src}")
             
-            # Lưu vào lịch sử
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 if __name__ == "__main__":
