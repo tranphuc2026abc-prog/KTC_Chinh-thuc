@@ -1,30 +1,25 @@
-# ==============================================================================
-#   DỰ ÁN KHKT: TRỢ LÝ ẢO TRA CỨU KIẾN THỨC TIN HỌC (KTC AI)
-#   Tác giả: Nhóm KHKT THCS & THPT Phạm Kiệt
-#   GVHD: Thầy Khanh
-# ==============================================================================
-
 import os
 import glob
 import time
 import streamlit as st
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 # --- AI & Data Processing Libraries ---
-from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.documents import Document
-
-# --- Translation Libraries ---
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-
-# --- LLM Client ---
-from groq import Groq
+# Tối ưu import để tránh nạp thư viện không cần thiết nếu chưa dùng
+try:
+    from pypdf import PdfReader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain_huggingface import HuggingFaceEmbeddings
+    from langchain_core.documents import Document
+    from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+    from groq import Groq
+except ImportError as e:
+    st.error(f"❌ Thiếu thư viện: {e}. Vui lòng chạy: pip install -r requirements.txt")
+    st.stop()
 
 # ==============================================================================
-# 1. CẤU HÌNH HỆ THỐNG & HẰNG SỐ
+# 1. CẤU HÌNH HỆ THỐNG (CONFIG)
 # ==============================================================================
 
 st.set_page_config(
@@ -35,25 +30,29 @@ st.set_page_config(
 )
 
 class AppConfig:
+    """Class chứa toàn bộ cấu hình để dễ dàng quản lý và thay đổi."""
     # Model Settings
     LLM_MODEL = 'llama-3.1-8b-instant'
+    # Model Embedding nhẹ nhưng hiệu quả cho tiếng Việt/Anh
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     TRANSLATION_MODEL = "Helsinki-NLP/opus-mt-vi-en"
     
-    # Data Settings
+    # Paths
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
+    LOGO_PATH = "LOGO.jpg"
     
-    # RAG Settings (Đã tinh chỉnh để tìm kiếm sâu hơn)
-    CHUNK_SIZE = 1000 # Tăng kích thước đoạn đọc để hiểu ngữ cảnh tốt hơn
+    # RAG Parameters
+    CHUNK_SIZE = 1000 
     CHUNK_OVERLAP = 200
-    TOP_K_RETRIEVAL = 6 # Tăng số lượng nguồn tham khảo lên 6 để tránh bỏ sót
+    TOP_K_RETRIEVAL = 5 # Giữ ở mức 5 để cân bằng tốc độ và độ chính xác
 
 # ==============================================================================
-# 2. GIAO DIỆN (CSS & STYLING) - ĐÃ TỐI ƯU CHO GỌN
+# 2. GIAO DIỆN & CSS (UI/UX)
 # ==============================================================================
 
 def inject_custom_css():
+    """CSS tùy chỉnh để giao diện sạch, đẹp và chuyên nghiệp hơn."""
     st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
@@ -62,126 +61,121 @@ def inject_custom_css():
             font-family: 'Inter', sans-serif;
         }
         
-        /* Thu gọn khoảng cách đầu trang để đỡ tốn diện tích */
-        .block-container {
-            padding-top: 2rem !important; 
-            padding-bottom: 2rem !important;
-        }
-        
-        /* Header Styling */
+        /* Tinh chỉnh Header chính */
         .main-header {
-            background: linear-gradient(90deg, #0f4c81 0%, #00c6ff 100%);
-            padding: 15px; /* Giảm padding */
-            border-radius: 10px;
+            background: linear-gradient(135deg, #0f4c81 0%, #00c6ff 100%);
+            padding: 20px;
+            border-radius: 12px;
             color: white;
             text-align: center;
-            margin-bottom: 15px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 25px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }
         .main-header h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
             margin: 0;
-            font-size: 2rem; /* Giảm cỡ chữ tiêu đề chút */
-            font-weight: 700;
-            color: white !important;
+            color: #ffffff !important;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
         }
         .main-header p {
-            font-size: 1rem;
-            opacity: 0.9;
-            margin-bottom: 0px;
+            font-size: 1.1rem;
+            opacity: 0.95;
+            margin-top: 5px;
         }
 
-        /* Sidebar Info - Làm gọn tối đa */
-        .project-info {
-            background-color: #f0f2f6;
-            padding: 10px; /* Giảm padding */
-            border-radius: 8px;
-            font-size: 0.85rem; /* Chữ nhỏ lại xíu cho gọn */
-            line-height: 1.4;
-            border-left: 4px solid #0f4c81;
+        /* Tinh chỉnh Sidebar */
+        [data-testid="stSidebar"] {
+            background-color: #f8f9fa;
+        }
+        .sidebar-info {
+            background-color: #ffffff;
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #e0e0e0;
+            border-left: 5px solid #0f4c81;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        .sidebar-title {
+            color: #0f4c81;
+            font-weight: 800;
+            text-align: center;
+            font-size: 0.9rem;
             margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .sidebar-text {
+            font-size: 0.85rem;
+            color: #333;
+            line-height: 1.5;
         }
         
-        /* Ẩn bớt khoảng trắng thừa mặc định của Streamlit Sidebar */
-        section[data-testid="stSidebar"] > div {
-            padding-top: 1rem;
+        /* Bong bóng chat */
+        .stChatMessage {
+            border-radius: 10px;
+            padding: 10px;
         }
     </style>
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. QUẢN LÝ TÀI NGUYÊN (CACHING RESOURCE)
+# 3. QUẢN LÝ TÀI NGUYÊN (CACHING & INITIALIZATION)
 # ==============================================================================
 
 @st.cache_resource(show_spinner=False)
 def load_groq_client():
-    """Khởi tạo kết nối đến Groq API."""
+    """Khởi tạo Groq Client an toàn."""
     try:
-        api_key = st.secrets["GROQ_API_KEY"]
+        api_key = st.secrets.get("GROQ_API_KEY")
+        if not api_key:
+            st.error("⚠️ Chưa cấu hình GROQ_API_KEY trong Secrets.")
+            return None
         return Groq(api_key=api_key)
     except Exception as e:
-        st.error(f"❌ Lỗi cấu hình API Key: {e}")
+        st.error(f"❌ Lỗi kết nối Groq: {e}")
         return None
 
 @st.cache_resource(show_spinner=False)
 def load_embedding_model():
-    """Tải model Embedding (Chạy 1 lần duy nhất)."""
-    return HuggingFaceEmbeddings(model_name=AppConfig.EMBEDDING_MODEL)
+    """Load model vector hóa (chạy 1 lần)."""
+    try:
+        return HuggingFaceEmbeddings(model_name=AppConfig.EMBEDDING_MODEL)
+    except Exception as e:
+        st.error(f"❌ Lỗi tải Embedding Model: {e}")
+        return None
 
 @st.cache_resource(show_spinner=False)
 def load_translator():
-    """Tải model Dịch thuật (Chạy 1 lần duy nhất)."""
+    """Load model dịch thuật (chạy 1 lần)."""
     try:
+        # Sử dụng device=-1 cho CPU (Streamlit Cloud thường không có GPU)
         tokenizer = AutoTokenizer.from_pretrained(AppConfig.TRANSLATION_MODEL)
         model = AutoModelForSeq2SeqLM.from_pretrained(AppConfig.TRANSLATION_MODEL)
-        translator = pipeline(
-            "translation", 
-            model=model, 
-            tokenizer=tokenizer, 
-            src_lang="vi", 
-            tgt_lang="en"
-        )
+        translator = pipeline("translation", model=model, tokenizer=tokenizer, src_lang="vi", tgt_lang="en")
         return translator
     except Exception as e:
-        print(f"Translator Error: {e}")
+        # Không return None để app vẫn chạy được dù không có dịch
+        print(f"Translator Warning: {e}") 
         return None
 
 # ==============================================================================
-# 4. XỬ LÝ DỮ LIỆU & RAG LOGIC
+# 4. LOGIC XỬ LÝ DỮ LIỆU & RAG (CORE)
 # ==============================================================================
 
 class KnowledgeBaseManager:
+    """Quản lý việc đọc PDF và tạo Vector DB."""
+    
     def __init__(self):
         self.embeddings = load_embedding_model()
     
-    def load_documents(self) -> List[Document]:
-        """Đọc toàn bộ file PDF trong thư mục."""
-        if not os.path.exists(AppConfig.PDF_DIR):
-            os.makedirs(AppConfig.PDF_DIR)
-            return []
-        
-        pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
-        docs = []
-        
-        for pdf_path in pdf_files:
-            try:
-                reader = PdfReader(pdf_path)
-                filename = os.path.basename(pdf_path)
-                for i, page in enumerate(reader.pages):
-                    text = page.extract_text()
-                    if text and len(text.strip()) > 50: # Chỉ lấy trang có nội dung đáng kể
-                        docs.append(Document(
-                            page_content=text,
-                            metadata={"source": filename, "page": i + 1}
-                        ))
-            except Exception as e:
-                st.warning(f"⚠️ Không đọc được file {pdf_path}. Bỏ qua.")
-        
-        return docs
-
-    def get_vector_store(self, force_rebuild=False):
-        """Tải hoặc xây dựng lại Vector Database."""
-        # Nếu thư mục DB tồn tại và không bị ép build lại, thì load lên
-        if os.path.exists(AppConfig.VECTOR_DB_PATH) and not force_rebuild:
+    def get_vector_store(self):
+        """Lấy Vector Store, nếu chưa có thì tự build."""
+        if not self.embeddings:
+            return None
+            
+        # 1. Thử load từ ổ cứng
+        if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 return FAISS.load_local(
                     AppConfig.VECTOR_DB_PATH, 
@@ -189,129 +183,147 @@ class KnowledgeBaseManager:
                     allow_dangerous_deserialization=True
                 )
             except Exception:
-                pass # Nếu lỗi load thì build lại từ đầu
+                st.toast("⚠️ Database lỗi, đang tạo lại...", icon="🔄")
+        
+        # 2. Nếu chưa có hoặc lỗi, build mới
+        return self._build_new_vector_store()
 
-        # Build mới (Chạy khi xóa folder hoặc lần đầu tiên)
-        docs = self.load_documents()
-        if not docs:
+    def _build_new_vector_store(self):
+        """Hàm nội bộ để đọc PDF và tạo index."""
+        if not os.path.exists(AppConfig.PDF_DIR):
+            os.makedirs(AppConfig.PDF_DIR)
             return None
             
+        pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
+        if not pdf_files:
+            return None
+            
+        docs = []
+        status_text = st.empty()
+        status_text.info(f"📚 Đang nạp {len(pdf_files)} tài liệu PDF...")
+        
+        for pdf_path in pdf_files:
+            try:
+                reader = PdfReader(pdf_path)
+                filename = os.path.basename(pdf_path)
+                for i, page in enumerate(reader.pages):
+                    text = page.extract_text()
+                    if text and len(text.strip()) > 50:
+                        docs.append(Document(
+                            page_content=text,
+                            metadata={"source": filename, "page": i + 1}
+                        ))
+            except Exception:
+                continue # Bỏ qua file lỗi
+        
+        status_text.empty() # Xóa thông báo
+        
+        if not docs:
+            return None
+
+        # Chia nhỏ văn bản
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=AppConfig.CHUNK_SIZE,
             chunk_overlap=AppConfig.CHUNK_OVERLAP
         )
         splits = splitter.split_documents(docs)
         
+        # Tạo và lưu DB
         vector_db = FAISS.from_documents(splits, self.embeddings)
         vector_db.save_local(AppConfig.VECTOR_DB_PATH)
         return vector_db
 
 # ==============================================================================
-# 5. CÁC HÀM HỖ TRỢ (UTILITIES)
+# 5. UTILITIES (HÀM HỖ TRỢ)
 # ==============================================================================
 
 def translate_query(text: str, translator) -> str:
-    """Dịch câu hỏi từ Việt sang Anh để RAG hoạt động tốt hơn với tài liệu tiếng Anh."""
-    if not translator:
-        return text
+    """Dịch câu hỏi sang tiếng Anh."""
+    if not translator: return text
     try:
-        # Giới hạn độ dài để tránh lỗi model
-        result = translator(text[:512]) 
-        return result[0]['translation_text']
+        return translator(text[:512])[0]['translation_text']
     except Exception:
         return text
 
 def retrieve_info(vector_db, query: str) -> Tuple[str, List[str]]:
-    """Tìm kiếm thông tin liên quan trong Vector DB."""
+    """Tìm kiếm thông tin trong Vector DB."""
     if not vector_db:
         return "", []
-    
     try:
+        # Tìm kiếm similarity
         results = vector_db.similarity_search(query, k=AppConfig.TOP_K_RETRIEVAL)
-        context_str = ""
-        sources_list = []
-        
-        for doc in results:
-            context_str += f"---\nNội dung: {doc.page_content}\n"
-            sources_list.append(f"📄 {doc.metadata['source']} (Trang {doc.metadata['page']})")
-            
-        return context_str, list(set(sources_list)) # Remove duplicates
-    except Exception as e:
+        context = "\n\n".join([f"[Nguồn: {d.metadata['source']} - Tr. {d.metadata['page']}]\n{d.page_content}" for d in results])
+        sources = list(set([f"{d.metadata['source']} (Trang {d.metadata['page']})" for d in results]))
+        return context, sources
+    except Exception:
         return "", []
 
-def generate_response_stream(client, context, question):
-    """Tạo câu trả lời từ LLM (Streaming) - Đã tối ưu cho câu hỏi tổng quan."""
-    
+def generate_stream_response(client, context, question):
+    """Gọi LLM trả về Stream."""
     system_prompt = f"""
-    Bạn là KTC Assistant, một trợ lý giáo dục chuyên nghiệp.
+    Bạn là KTC Assistant, một trợ lý giáo dục ảo, chuyên gia về Tin học.
     
-    [QUY TRÌNH TƯ DUY VÀ TRẢ LỜI]:
-    1. Phân tích câu hỏi:
-       - Nếu là câu hỏi chi tiết (Ví dụ: "Hàm IF là gì?"): Chỉ dùng thông tin trong [DỮ LIỆU TRA CỨU] để trả lời chính xác.
-       - Nếu là câu hỏi TỔNG QUÁT/TÓM TẮT (Ví dụ: "Tóm tắt Tin 12", "Tin 10 học gì?"):
-         + Nếu [DỮ LIỆU TRA CỨU] quá ít hoặc chỉ nói về một phần nhỏ (ví dụ chỉ nói về đạo đức), bạn ĐƯỢC PHÉP dùng kiến thức chuẩn của mình về chương trình GDPT 2018 để khái quát nội dung chính (Liệt kê các chủ đề/Module chính).
-         + Sau đó dùng [DỮ LIỆU TRA CỨU] để trích dẫn chi tiết minh họa.
+    NHIỆM VỤ: Trả lời câu hỏi dựa trên ngữ cảnh được cung cấp.
     
-    2. Phong cách:
-       - Sư phạm, dễ hiểu, trình bày mạch lạc (dùng Markdown, gạch đầu dòng).
-       - Luôn trích dẫn nguồn nếu lấy từ tài liệu.
-
-    [DỮ LIỆU TRA CỨU TỪ SÁCH GIÁO KHOA]:
+    NGUYÊN TẮC:
+    1. Ưu tiên dùng thông tin trong [CONTEXT]. Nếu không có, hãy dùng kiến thức chuẩn của bạn về Tin học (GDPT 2018).
+    2. Trả lời bằng Tiếng Việt, văn phong sư phạm, dễ hiểu, thân thiện.
+    3. Dùng Markdown để trình bày (in đậm từ khóa, gạch đầu dòng).
+    
+    [CONTEXT - DỮ LIỆU TRA CỨU]:
     {context}
     """
     
     try:
-        stream = client.chat.completions.create(
+        return client.chat.completions.create(
             model=AppConfig.LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question}
             ],
             stream=True,
-            temperature=0.5 # Tăng nhẹ độ sáng tạo để AI tổng hợp tốt hơn
+            temperature=0.3 # Giảm nhiệt độ để câu trả lời chính xác hơn với tài liệu
         )
-        return stream
     except Exception as e:
-        return f"Lỗi kết nối AI: {str(e)}"
+        return f"❌ Lỗi kết nối AI: {str(e)}"
+
 # ==============================================================================
-# 6. MAIN APP LOOP (LOGO NHỎ & CÂN ĐỐI)
+# 6. MAIN APP
 # ==============================================================================
 
 def main():
     inject_custom_css()
     
-    # --- Cấu hình Sidebar ---
+    # --- Sidebar ---
     with st.sidebar:
-        # 1. Xử lý Logo: Chia cột để logo nhỏ lại và nằm giữa (Tỷ lệ 1-3-1)
-        if os.path.exists("LOGO.jpg"):
-            c1, c2, c3 = st.columns([1, 3, 1]) 
-            with c2: 
-                st.image("LOGO.jpg", use_container_width=True)
+        # Logo căn giữa đẹp mắt
+        if os.path.exists(AppConfig.LOGO_PATH):
+            col1, col2, col3 = st.columns([1, 4, 1])
+            with col2:
+                st.image(AppConfig.LOGO_PATH, use_container_width=True)
         else:
-            st.title("🤖")
+            st.markdown("<div style='text-align:center; font-size: 50px;'>🤖</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
         
-        st.write("") # Tạo khoảng cách nhỏ xíu dưới logo
-        
-        # 2. Thông tin dự án (Gọn gàng)
+        # Thông tin dự án clean và chuyên nghiệp
         st.markdown("""
-        <div class="project-info">
-            <div style="text-align: center; font-weight: bold; margin-bottom: 5px; color: #0f4c81;">
-                🏆 SẢN PHẨM DỰ THI<br>KHKT CẤP TRƯỜNG
+        <div class="sidebar-info">
+            <div class="sidebar-title">🏆 SẢN PHẨM DỰ THI<br>KHKT CẤP TRƯỜNG</div>
+            <div class="sidebar-text">
+                <b>Đơn vị:</b> THCS & THPT Phạm Kiệt<br>
+                <b>Tác giả:</b> Bùi Tá Tùng & Cao Sỹ Bảo Chung<br>
+                <b>GVHD:</b> Thầy Khanh
             </div>
-            <b>THCS & THPT Phạm Kiệt</b><br>
-            Tác giả: Bùi Tá Tùng & Cao Sỹ Bảo Chung<br>
-            GVHD: Thầy Khanh
         </div>
         """, unsafe_allow_html=True)
         
-        st.markdown("---")
-        
-        # Nút xóa lịch sử
-        if st.button("🗑️ Xóa lịch sử chat", use_container_width=True, key="btn_clear"):
+        # Nút chức năng
+        if st.button("🗑️ Xóa lịch sử trò chuyện", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
 
-    # --- Giao diện chính (Bên phải) ---
+    # --- Main Interface ---
     st.markdown("""
     <div class="main-header">
         <h1>🎓 TRỢ LÝ ẢO KTC AI</h1>
@@ -322,21 +334,26 @@ def main():
     # Khởi tạo Session State
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "Chào bạn! Mình là **KTC AI**. Mình có thể giúp gì cho bài học hôm nay? 🧑‍💻"}
+            {"role": "assistant", "content": "Chào bạn! Thầy Khanh và nhóm KHKT đã nạp đầy đủ dữ liệu. Bạn cần tìm hiểu kiến thức gì nào? 🧑‍💻"}
         ]
-    
-    # Load Resources
+
+    # Load Resources (Chỉ load 1 lần)
     groq_client = load_groq_client()
     translator = load_translator()
     
+    # Check Vector DB (Lazy loading để app mở nhanh hơn)
     if "vector_db" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức..."):
-            # Logic: Nếu không tìm thấy vector_db trên đĩa thì tự động build lại
-            kb = KnowledgeBaseManager()
-            st.session_state.vector_db = kb.get_vector_store()
+        kb = KnowledgeBaseManager()
+        db = kb.get_vector_store()
+        if db:
+            st.session_state.vector_db = db
+            st.toast("✅ Đã nạp dữ liệu thành công!", icon="ready")
+        else:
+            st.session_state.vector_db = None
+            # Không báo lỗi ngay, để người dùng vẫn chat được (nhưng AI sẽ trả lời chay)
 
     if not groq_client:
-        st.error("⚠️ Lỗi API Key: Vui lòng kiểm tra file cấu hình secrets.")
+        st.warning("⚠️ Hệ thống đang bảo trì kết nối AI. Vui lòng kiểm tra lại sau.")
         st.stop()
 
     # Hiển thị lịch sử chat
@@ -345,44 +362,62 @@ def main():
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # Xử lý Chat Input
-    if prompt := st.chat_input("Nhập câu hỏi của bạn tại đây..."):
+    # Xử lý input người dùng
+    if prompt := st.chat_input("Nhập câu hỏi của bạn (Ví dụ: Cấu trúc rẽ nhánh là gì?)..."):
+        # 1. Hiển thị câu hỏi người dùng
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user", avatar="🧑‍🎓"):
             st.markdown(prompt)
 
+        # 2. AI xử lý (Dùng st.status để hiển thị quy trình - Rất tốt cho thi KHKT)
         with st.chat_message("assistant", avatar="🤖"):
-            message_placeholder = st.empty()
-            
-            search_query = prompt
-            if translator:
-                translated = translate_query(prompt, translator)
-                if translated and translated != prompt:
-                    search_query = translated
-
-            context_text, sources = retrieve_info(st.session_state.vector_db, search_query)
-            
-            if not context_text:
-                context_text = "Không tìm thấy thông tin cụ thể trong tài liệu. Trả lời dựa trên kiến thức chung."
-
-            stream = generate_response_stream(groq_client, context_text, prompt)
-            
+            response_placeholder = st.empty()
             full_response = ""
-            if isinstance(stream, str):
+            sources = []
+            
+            with st.status("🔍 Hệ thống đang phân tích...", expanded=True) as status:
+                
+                # Bước 1: Dịch thuật (Nếu cần)
+                search_query = prompt
+                if translator:
+                    st.write("🇬🇧 Đang dịch câu hỏi sang tiếng Anh để tra cứu sâu hơn...")
+                    translated = translate_query(prompt, translator)
+                    if translated != prompt:
+                        search_query = translated
+                        # st.caption(f"Query (En): {search_query}") # Debug nếu cần
+
+                # Bước 2: Truy xuất dữ liệu (RAG)
+                st.write("📚 Đang quét cơ sở dữ liệu PDF...")
+                context_text, sources = retrieve_info(st.session_state.get("vector_db"), search_query)
+                
+                if not context_text:
+                    context_text = "Không tìm thấy dữ liệu trong sách. Sử dụng kiến thức nền tảng."
+                    st.write("⚠️ Không tìm thấy trong tài liệu, sử dụng kiến thức AI.")
+                else:
+                    st.write("✅ Đã tìm thấy thông tin liên quan.")
+                
+                status.update(label="✅ Đã xử lý xong!", state="complete", expanded=False)
+
+            # Bước 3: Streaming câu trả lời
+            stream = generate_stream_response(groq_client, context_text, prompt)
+            
+            if isinstance(stream, str): # Trường hợp lỗi trả về string
                 full_response = stream
-                message_placeholder.markdown(full_response)
+                response_placeholder.markdown(full_response)
             else:
                 for chunk in stream:
-                    if chunk.choices[0].delta.content:
-                        full_response += chunk.choices[0].delta.content
-                        message_placeholder.markdown(full_response + "▌")
-                message_placeholder.markdown(full_response)
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        full_response += content
+                        response_placeholder.markdown(full_response + "▌")
+                response_placeholder.markdown(full_response)
 
+            # Bước 4: Hiển thị nguồn (Minh chứng khoa học)
             if sources:
-                with st.expander("📚 Tài liệu tham khảo & Minh chứng"):
+                with st.expander("📖 Nguồn tài liệu tham khảo"):
                     for src in sources:
                         st.markdown(f"- {src}")
-            
+
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 if __name__ == "__main__":
