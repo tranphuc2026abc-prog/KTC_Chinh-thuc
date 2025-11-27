@@ -24,10 +24,7 @@ PDF_DIR = "./PDF_KNOWLEDGE"
 LOGO_PATH = "LOGO.jpg"
 
 # --- TÙY CHỈNH THAM SỐ TÌM KIẾM ---
-# Tăng ngưỡng lên 1.6 để chấp nhận các từ khóa ngắn (như HTML, RAM)
-# Nếu AI trả lời sai nhiều quá thì giảm xuống 1.4
 SIMILARITY_THRESHOLD = 1.6  
-# Số lượng đoạn văn lấy ra để AI đọc (Tăng lên 6 để AI có nhiều ngữ cảnh hơn)
 TOP_K_RETRIEVAL = 6
 
 # --- 2. CSS TÙY CHỈNH GIAO DIỆN ---
@@ -148,7 +145,9 @@ with st.sidebar:
     st.markdown(html_info, unsafe_allow_html=True)
     
     st.markdown("<div style='height: 20px'></div>", unsafe_allow_html=True)
-    if st.button("🗑️ Xóa hội thoại", use_container_width=True):
+    
+    # --- CẬP NHẬT 1: Đổi icon và tên nút ---
+    if st.button("🔄 Làm mới hội thoại", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
@@ -177,22 +176,21 @@ with col2:
         relevant_docs = []
 
         if st.session_state.vector_db:
-            # Tăng k=TOP_K_RETRIEVAL để tìm sâu hơn
             results_with_score = st.session_state.vector_db.similarity_search_with_score(prompt, k=TOP_K_RETRIEVAL)
             
             for doc, score in results_with_score:
-                # Nới lỏng Threshold để bắt từ khóa ngắn
                 if score < SIMILARITY_THRESHOLD: 
                     context_text += f"\n---\n[Nguồn: {doc.metadata['source']} - Tr.{doc.metadata['page']}]\nNội dung: {doc.page_content}"
                     sources_list.append(f"{doc.metadata['source']} (Trang {doc.metadata['page']})")
                     relevant_docs.append(doc)
         
-        # --- PROMPT ENGINEERING CHẶT CHẼ (CHỐNG BỊA ĐẶT) ---
+        # --- PROMPT ENGINEERING CHẶT CHẼ ---
         if not context_text:
             context_part = "BỐI CẢNH TÀI LIỆU: (Trống - Không tìm thấy thông tin phù hợp trong kho dữ liệu)."
         else:
             context_part = f"BỐI CẢNH TÀI LIỆU:\n{context_text}"
 
+        # --- CẬP NHẬT 2: Đổi câu thông báo chuyên nghiệp hơn ---
         system_instruction = f"""
         Bạn là "Chatbot KTC", trợ lý Tin học thông minh của thầy Khanh.
         
@@ -208,14 +206,13 @@ with col2:
         - Dịch sang tiếng Việt nếu tài liệu là tiếng Anh.
         
         🔴 TRƯỜNG HỢP 2: NẾU KHÔNG THẤY THÔNG TIN TRONG BỐI CẢNH (HOẶC BỐI CẢNH TRỐNG)
-        - Bạn phải bắt đầu câu trả lời bằng câu: "⚠️ Thông tin này không có trong kho tài liệu của Thầy Khanh."
-        - SAU ĐÓ: Bạn được phép dùng kiến thức riêng của bạn (Chatbot) để giải thích cho học sinh hiểu, nhưng phải nói rõ đây là kiến thức bổ sung.
+        - Bạn phải bắt đầu câu trả lời bằng câu chính xác sau: "⚠️ Thông tin này chưa được cập nhật trong Kho tri thức số của dự án KTC."
+        - SAU ĐÓ: Bạn được phép dùng kiến thức riêng của bạn để giải thích bổ sung cho học sinh hiểu.
         - TUYỆT ĐỐI KHÔNG được bịa đặt nguồn gốc tài liệu nếu không tìm thấy.
         
         {context_part}
         """
 
-        # Gọi API Groq
         with st.chat_message("assistant", avatar="🤖"):
             placeholder = st.empty()
             full_response = ""
@@ -227,7 +224,7 @@ with col2:
                     ],
                     model=MODEL_NAME, 
                     stream=True, 
-                    temperature=0.3 # Giữ nhiệt độ thấp để bot trung thực
+                    temperature=0.3
                 )
 
                 for chunk in chat_completion:
@@ -238,7 +235,6 @@ with col2:
                 
                 placeholder.markdown(full_response)
                 
-                # CHỈ HIỆN NGUỒN NẾU CÓ TÌM THẤY TÀI LIỆU
                 if relevant_docs:
                     with st.expander("📚 Xem tài liệu gốc tìm thấy (Minh chứng)"):
                         for doc in relevant_docs:
