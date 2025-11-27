@@ -8,7 +8,6 @@ langchain-groq
 faiss-cpu
 sentence-transformers
 transformers>=4.30.0
-torch
 groq
 watchdog
 numpy<2.0.0
