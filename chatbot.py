@@ -270,27 +270,27 @@ def generate_response_stream(client, context, question):
         return f"Lỗi kết nối AI: {str(e)}"
 
 # ==============================================================================
-# 6. MAIN APP LOOP 
+# 6. MAIN APP LOOP (CẬP NHẬT GIAO DIỆN MỚI)
 # ==============================================================================
 
 def main():
     inject_custom_css()
     
-    # --- Cấu hình Sidebar (Thanh bên trái) ---
+    # --- Cấu hình Sidebar ---
     with st.sidebar:
-        # Hiển thị Logo (Dùng cột để căn giữa cho đẹp)
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            if os.path.exists("LOGO.jpg"):
-                st.image("LOGO.jpg", use_container_width=True)
-            else:
-                st.title("🤖")
+        # 1. Hiển thị Logo: Để use_container_width=True để logo tự căn vừa vặn đẹp nhất
+        if os.path.exists("LOGO.jpg"):
+            st.image("LOGO.jpg", use_container_width=True)
+        else:
+            st.title("🤖")
         
-        # Thông tin dự án
+        # 2. Thông tin dự án (Đã sửa nội dung)
         st.markdown("""
         <div class="project-info">
-            <b>🏆 DỰ ÁN KHKT 2024-2025</b><br>
-            Đơn vị: THCS & THPT Phạm Kiệt<br>
+            <div style="text-align: center; font-weight: bold; margin-bottom: 5px;">
+                🏆 SẢN PHẨM DỰ THI KHKT CẤP TRƯỜNG
+            </div>
+            THCS & THPT Phạm Kiệt<br>
             Tác giả: Bùi Tá Tùng & Cao Sỹ Bảo Chung<br>
             GVHD: Thầy Khanh
         </div>
@@ -299,16 +299,8 @@ def main():
         st.markdown("---")
         st.subheader("⚙️ Điều khiển")
         
-        # Nút cập nhật dữ liệu
-        if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True, key="btn_update"):
-            with st.spinner("Đang đọc tài liệu và học lại..."):
-                kb = KnowledgeBaseManager()
-                # Force rebuild và lưu vào session_state
-                st.session_state.vector_db = kb.get_vector_store(force_rebuild=True)
-            st.success("Đã cập nhật kiến thức thành công!")
-            time.sleep(1)
-            st.rerun()
-
+        # Đã xóa nút Cập nhật dữ liệu
+        
         # Nút xóa lịch sử
         if st.button("🗑️ Xóa lịch sử chat", use_container_width=True, key="btn_clear"):
             st.session_state.messages = []
@@ -322,13 +314,13 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Khởi tạo Session State cho tin nhắn
+    # Khởi tạo Session State
     if "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "assistant", "content": "Chào bạn! Mình là **KTC AI**. Mình có thể giúp gì cho bài học hôm nay? 🧑‍💻"}
         ]
     
-    # Load Resources (Chỉ load nếu chưa có để tối ưu tốc độ)
+    # Load Resources
     groq_client = load_groq_client()
     translator = load_translator()
     
@@ -358,7 +350,7 @@ def main():
         with st.chat_message("assistant", avatar="🤖"):
             message_placeholder = st.empty()
             
-            # Bước A: Dịch (nếu cần)
+            # Bước A: Dịch
             search_query = prompt
             if translator:
                 translated = translate_query(prompt, translator)
@@ -368,15 +360,15 @@ def main():
             # Bước B: Truy vấn RAG
             context_text, sources = retrieve_info(st.session_state.vector_db, search_query)
             
-            # Bước C: Gọi LLM (Kiểm tra context có rỗng không để xử lý khéo hơn)
             if not context_text:
-                context_text = "Không tìm thấy thông tin trong tài liệu. Hãy trả lời dựa trên kiến thức chung của bạn."
+                context_text = "Không tìm thấy thông tin cụ thể trong tài liệu. Trả lời dựa trên kiến thức chung."
 
+            # Bước C: Gọi LLM
             stream = generate_response_stream(groq_client, context_text, prompt)
             
             # Bước D: Streaming phản hồi
             full_response = ""
-            if isinstance(stream, str): # Xử lý nếu trả về lỗi chuỗi
+            if isinstance(stream, str):
                 full_response = stream
                 message_placeholder.markdown(full_response)
             else:
@@ -386,7 +378,7 @@ def main():
                         message_placeholder.markdown(full_response + "▌")
                 message_placeholder.markdown(full_response)
 
-            # Bước E: Hiển thị nguồn trích dẫn
+            # Bước E: Hiển thị nguồn
             if sources:
                 with st.expander("📚 Tài liệu tham khảo & Minh chứng"):
                     for src in sources:
