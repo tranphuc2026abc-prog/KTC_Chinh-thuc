@@ -22,140 +22,143 @@ except ImportError as e:
 # ==============================================================================
 
 st.set_page_config(
-    page_title="KTC Assistant - Trợ lý KHKT",
-    page_icon="🎓",
+    page_title="KTC Chatbot - THCS & THPT Phạm Kiệt",
+    page_icon="LOGO.jpg", # Dùng logo dự án làm icon tab
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 class AppConfig:
-    """Cấu hình trung tâm cho ứng dụng"""
-    # Model AI
+    """Cấu hình trung tâm"""
+    # Thay đổi model ở đây nếu cần
     LLM_MODEL = 'llama-3.1-8b-instant'
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     
     # Đường dẫn files
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
-    LOGO_PATH = "LOGO.jpg"
+    LOGO_PROJECT = "LOGO.jpg"     # Logo KTC
+    LOGO_SCHOOL = "LOGO PKS.png"  # Logo Trường Phạm Kiệt
     
     # Tham số RAG
     CHUNK_SIZE = 1000 
     CHUNK_OVERLAP = 200
     TOP_K_RETRIEVAL = 4
-    
-    # Tối ưu performance
-    MAX_CONTEXT_LENGTH = 3000
+    MAX_CONTEXT_LENGTH = 3500
 
 # ==============================================================================
-# 2. UI/UX: GIAO DIỆN HIỆN ĐẠI (ĐÃ TỐI ƯU)
+# 2. UI/UX: GIAO DIỆN HI-TECH (CUSTOM CSS)
 # ==============================================================================
 
 def inject_custom_css():
-    """CSS tối ưu cho giao diện - Clean & Compact"""
     st.markdown("""
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
         
-        /* Font chữ toàn hệ thống */
+        /* --- TỔNG THỂ --- */
         html, body, [class*="css"] {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Roboto', sans-serif;
         }
-
-        /* 1. Header nhỏ gọn, hiện đại hơn */
+        
+        /* Màu chủ đạo theo Logo KTC: Xanh Cyan (#00E5FF) và Xanh đậm */
+        
+        /* --- HEADER --- */
         .main-header {
-            background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%);
-            padding: 1rem 1.5rem; /* Thu nhỏ padding */
-            border-radius: 12px;
+            background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
+            padding: 1.5rem;
+            border-radius: 15px;
             color: white;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 15px rgba(0, 229, 255, 0.2); /* Đổ bóng xanh neon */
+            border: 1px solid rgba(255,255,255,0.1);
         }
         
-        .main-header h1 {
-            color: white !important;
-            font-weight: 700;
+        .header-title h1 {
+            color: #00E5FF !important; /* Màu Cyan của logo KTC */
+            font-weight: 800;
             margin: 0;
-            font-size: 1.5rem; /* Font nhỏ lại cho cân đối */
+            font-size: 2.2rem;
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
         }
         
-        .main-header p {
-            margin: 0;
-            opacity: 0.8;
-            font-size: 0.9rem;
-            font-style: italic;
+        .header-title p {
+            margin: 5px 0 0 0;
+            font-size: 1rem;
+            color: #e0e0e0;
         }
 
-        /* 2. Sidebar tinh tế (Flat Design) */
+        /* --- SIDEBAR --- */
         [data-testid="stSidebar"] {
             background-color: #f8f9fa;
+            border-right: 1px solid #ddd;
         }
         
-        .sidebar-card {
-            background: transparent; /* Bỏ nền trắng nổi */
-            padding: 10px 0;
-            border-bottom: 1px solid #e9ecef;
-            margin-bottom: 15px;
+        .project-card {
+            background: white;
+            padding: 15px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+            text-align: center;
+            border: 1px solid #eee;
         }
         
-        .sidebar-card h4 {
-            color: #182848;
-            font-size: 1rem;
-            font-weight: 700;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .sidebar-text {
+        .author-info {
             font-size: 0.9rem;
-            color: #495057;
-            margin-bottom: 5px;
-            line-height: 1.4;
+            color: #333;
+            margin-top: 10px;
+            text-align: left;
+        }
+        
+        .school-logo-container {
+            margin-top: 20px;
+            text-align: center;
+            opacity: 0.9;
         }
 
-        /* 3. Chat Messages */
+        /* --- CHAT AREA --- */
         .stChatMessage {
             background-color: transparent;
         }
         
-        /* User message styling */
+        /* User message: Màu xanh nhạt dễ chịu */
         [data-testid="stChatMessageContent"]:has(+ [data-testid="stChatMessageAvatar"]) {
-            background-color: #e7f1ff;
-            border-radius: 15px 15px 0 15px;
-            color: #0f172a;
+            background: linear-gradient(to right, #e3f2fd, #bbdefb);
+            border-radius: 20px 20px 5px 20px;
+            color: #0d47a1;
+            border: none;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
         }
         
-        /* AI message styling */
+        /* AI message: Màu trắng sạch sẽ, viền xanh neon nhẹ */
         [data-testid="stChatMessageContent"]:not(:has(+ [data-testid="stChatMessageAvatar"])) {
             background-color: white;
-            border: 1px solid #e2e8f0;
-            border-radius: 15px 15px 15px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+            border: 1px solid #e1f5fe;
+            border-left: 4px solid #00E5FF; /* Điểm nhấn KTC */
+            border-radius: 5px 20px 20px 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
         }
 
-        /* 4. Suggestion Chips (Nút gợi ý) */
-        .suggestion-btn {
-            border: 1px solid #e2e8f0;
-            background: white;
+        /* --- SUGGESTION BUTTONS --- */
+        div.stButton > button {
             border-radius: 20px;
-            padding: 5px 15px;
-            margin: 0 5px;
-            cursor: pointer;
-            font-size: 0.85rem;
-            transition: all 0.2s;
-            color: #64748b;
+            border: 1px solid #b3e5fc;
+            background-color: white;
+            color: #0277bd;
+            font-size: 0.9rem;
+            transition: all 0.3s;
         }
-        .suggestion-btn:hover {
-            border-color: #4b6cb7;
-            color: #4b6cb7;
-            background: #f8fafc;
+        div.stButton > button:hover {
+            border-color: #00E5FF;
+            color: #00E5FF;
+            background-color: #e0f7fa;
+            transform: translateY(-2px);
         }
 
-        /* Ẩn bớt decoration của Streamlit */
+        /* Ẩn bớt footer mặc định */
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         
@@ -163,43 +166,48 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. LOGIC XỬ LÝ (BACKEND)
+# 3. LOGIC BACKEND (ĐÃ TỐI ƯU CACHING)
 # ==============================================================================
 
 @st.cache_resource(show_spinner=False)
 def load_groq_client():
     try:
-        api_key = st.secrets.get("GROQ_API_KEY")
-        if not api_key:
-            return None
+        # Ưu tiên lấy từ secrets, nếu không có thì thử biến môi trường
+        api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+        if not api_key: return None
         return Groq(api_key=api_key)
-    except Exception:
-        return None
+    except Exception: return None
 
 @st.cache_resource(show_spinner=False)
 def load_embedding_model():
+    """Load model 1 lần duy nhất khi khởi động app"""
     try:
-        with st.spinner("🔄 Khởi động hệ thống AI..."):
-            embeddings = HuggingFaceEmbeddings(
-                model_name=AppConfig.EMBEDDING_MODEL,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-        return embeddings
-    except Exception:
+        return HuggingFaceEmbeddings(
+            model_name=AppConfig.EMBEDDING_MODEL,
+            model_kwargs={'device': 'cpu'},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+    except: return None
+
+# Tối ưu: Chỉ quét lại PDF khi file index chưa tồn tại hoặc user yêu cầu
+def load_vector_db(embeddings, force_rebuild=False):
+    if not embeddings: return None
+    
+    # Nếu đã có DB và không bắt buộc rebuild -> Load ngay (Nhanh)
+    if os.path.exists(AppConfig.VECTOR_DB_PATH) and not force_rebuild:
+        try:
+            return FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
+        except: pass # Nếu lỗi file cũ thì rebuild
+
+    # Rebuild (Chậm hơn chút)
+    if not os.path.exists(AppConfig.PDF_DIR):
+        os.makedirs(AppConfig.PDF_DIR, exist_ok=True)
         return None
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_and_process_pdfs(pdf_dir):
+    pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
+    if not pdf_files: return None
+
     docs = []
-    if not os.path.exists(pdf_dir):
-        os.makedirs(pdf_dir, exist_ok=True)
-        return docs
-    
-    pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
-    if not pdf_files: return docs
-    
-    # Gom gọn xử lý PDF để giao diện không bị giật
     for pdf_path in pdf_files:
         try:
             reader = PdfReader(pdf_path)
@@ -217,229 +225,211 @@ def load_and_process_pdfs(pdf_dir):
             chunk_size=AppConfig.CHUNK_SIZE,
             chunk_overlap=AppConfig.CHUNK_OVERLAP
         )
-        return splitter.split_documents(docs)
-    return []
+        splits = splitter.split_documents(docs)
+        vector_db = FAISS.from_documents(splits, embeddings)
+        vector_db.save_local(AppConfig.VECTOR_DB_PATH)
+        return vector_db
+    return None
 
-class KnowledgeBase:
-    def __init__(self):
-        self.embeddings = load_embedding_model()
-        self.db_path = AppConfig.VECTOR_DB_PATH
-
-    def get_vector_store(self, force_rebuild=False):
-        if not self.embeddings: return None
-        if os.path.exists(self.db_path) and not force_rebuild:
-            try:
-                return FAISS.load_local(self.db_path, self.embeddings, allow_dangerous_deserialization=True)
-            except: pass
-        
-        splits = load_and_process_pdfs(AppConfig.PDF_DIR)
-        if splits:
-            vector_db = FAISS.from_documents(splits, self.embeddings)
-            vector_db.save_local(self.db_path)
-            return vector_db
-        return None
+def get_rag_response(client, vector_db, query):
+    """Xử lý logic RAG: Tìm kiếm -> Tạo prompt -> Stream trả lời"""
     
-    def rebuild_database(self):
-        if os.path.exists(self.db_path):
-            import shutil
-            shutil.rmtree(self.db_path)
-        load_and_process_pdfs.clear()
-        return self.get_vector_store(force_rebuild=True)
-
-def get_context(vector_db, query):
-    if not vector_db: return "", []
-    try:
+    # 1. Tìm kiếm ngữ cảnh
+    context_text = ""
+    sources = []
+    
+    if vector_db:
         results = vector_db.similarity_search_with_score(query, k=AppConfig.TOP_K_RETRIEVAL)
-        context_parts, sources = [], []
-        total_len = 0
+        context_parts = []
         for doc, score in results:
-            if score > 1.6: continue
+            # Lọc bớt kết quả không liên quan (score càng nhỏ càng tốt với L2 distance, nhưng FAISS mặc định similarity score khác)
+            # Với FAISS mặc định cosine similarity hay L2 cần check kỹ. Ở đây ta lấy top K thôi.
             src = doc.metadata.get('source', 'Tài liệu')
             page = doc.metadata.get('page', '1')
             content = doc.page_content.replace("\n", " ").strip()
-            if total_len + len(content) > AppConfig.MAX_CONTEXT_LENGTH: break
-            context_parts.append(f"[{src} - Tr.{page}]: {content}")
-            sources.append(f"{src} (Trang {page})")
-            total_len += len(content)
-        return "\n\n".join(context_parts), list(set(sources))
-    except: return "", []
+            
+            context_parts.append(f"Content: {content}\nSource: {src} (Page {page})")
+            sources.append(f"{src} - Trang {page}")
+        
+        context_text = "\n\n".join(context_parts)
 
-def generate_stream(client, context, question):
-    system_prompt = f"""Bạn là KTC Assistant - Trợ lý AI chuyên về Tin học & KHKT.
+    # 2. System Prompt (Guardrails)
+    system_prompt = f"""Bạn là KTC Assistant - Trợ lý ảo hỗ trợ học tập trường THCS & THPT Phạm Kiệt.
     
-    YÊU CẦU:
-    1. Dựa CỐT LÕI vào [CONTEXT] bên dưới.
-    2. Trả lời ngắn gọn, súc tích, đi thẳng vào vấn đề.
-    3. Định dạng Markdown đẹp mắt (Bold từ khóa chính).
-    4. Giọng văn: Thân thiện, khích lệ (như một người thầy/người bạn).
+    NHIỆM VỤ:
+    - Trả lời câu hỏi dựa trên thông tin được cung cấp trong [CONTEXT].
+    - Nếu thông tin không có trong [CONTEXT], hãy dùng kiến thức chung nhưng nói rõ là "Theo kiến thức của tôi...".
+    - Luôn trả lời bằng tiếng Việt, giọng văn thân thiện, khuyến khích học sinh.
+    - Trình bày Markdown rõ ràng (dùng gạch đầu dòng, bôi đậm ý chính).
     
     [CONTEXT]:
-    {context if context else "Không có thông tin trong tài liệu."}
+    {context_text}
     """
+
+    # 3. Gọi API
     try:
-        completion = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=AppConfig.LLM_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
+                {"role": "user", "content": query}
             ],
             stream=True,
             temperature=0.3,
-            max_tokens=1500
+            max_tokens=2000
         )
-        for chunk in completion:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+        return stream, list(set(sources))
     except Exception as e:
-        yield f"⚠️ Lỗi: {str(e)}"
+        return f"Error: {str(e)}", []
 
 # ==============================================================================
-# 4. HÀM CHÍNH (MAIN APP)
+# 4. CHƯƠNG TRÌNH CHÍNH
 # ==============================================================================
 
 def main():
     if not DEPENDENCIES_OK:
-        st.error(f"❌ Thiếu thư viện: {IMPORT_ERROR}")
+        st.error(f"⚠️ Lỗi thư viện: {IMPORT_ERROR}. Vui lòng chạy `pip install -r requirements.txt`")
         st.stop()
-    
+        
     inject_custom_css()
     
-    # --- SIDEBAR ---
+    # --- SIDEBAR: Nơi thể hiện thương hiệu ---
     with st.sidebar:
-        if os.path.exists(AppConfig.LOGO_PATH):
-            st.image(AppConfig.LOGO_PATH, use_container_width=True)
-        else:
-            st.markdown("### 🤖 KTC Assistant")
-
-        st.markdown("---")
+        # 1. Logo KTC (Dự án)
+        if os.path.exists(AppConfig.LOGO_PROJECT):
+            st.image(AppConfig.LOGO_PROJECT, use_container_width=True)
         
-        # Thẻ thông tin gọn gàng hơn
+        # 2. Thông tin dự án
         st.markdown("""
-        <div class="sidebar-card">
-            <h4>DỰ ÁN KHKT 2024-2025</h4>
-            <div class="sidebar-text"><b>🏫 Đơn vị:</b> THCS & THPT Phạm Kiệt</div>
-            <div class="sidebar-text"><b>👨‍💻 Tác giả:</b> Tá Tùng & Bảo Chung</div>
-            <div class="sidebar-text"><b>🧑‍🏫 GVHD:</b> Thầy Khanh</div>
+        <div class="project-card">
+            <h3 style="margin:0; color:#0277bd;">KTC CHATBOT</h3>
+            <p style="font-size:0.8rem; color:gray;">Trợ lý ảo thông minh</p>
+            <hr style="margin:10px 0;">
+            <div class="author-info">
+                <b>👨‍💻 Tác giả:</b> Tá Tùng & Bảo Chung<br>
+                <b>🧑‍🏫 GVHD:</b> Thầy Khanh<br>
+                <b>🏆 Dự án:</b> KHKT 2024-2025
+            </div>
         </div>
         """, unsafe_allow_html=True)
         
-        # Cài đặt đã đổi tên thân thiện
-        with st.expander("⚙️ Cấu hình hệ thống"):
-            top_k = st.slider("Độ rộng tìm kiếm (Chunks)", 1, 8, AppConfig.TOP_K_RETRIEVAL)
-            AppConfig.TOP_K_RETRIEVAL = top_k
-            
-            if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
-                with st.spinner("Đang nạp lại dữ liệu..."):
-                    kb = KnowledgeBase()
-                    st.session_state.vector_db = kb.rebuild_database()
-                st.success("Đã xong!")
+        # 3. Công cụ
+        with st.expander("🛠️ Cài đặt & Dữ liệu"):
+            if st.button("🔄 Nạp lại dữ liệu gốc", use_container_width=True):
+                with st.spinner("Đang xử lý PDF..."):
+                    embeddings = load_embedding_model()
+                    st.session_state.vector_db = load_vector_db(embeddings, force_rebuild=True)
+                st.success("Dữ liệu đã cập nhật!")
                 time.sleep(1)
                 st.rerun()
+                
+            if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
+                st.session_state.messages = []
+                st.rerun()
 
-        if st.button("🗑️ Xóa hội thoại", use_container_width=True):
-            st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Mình là trợ lý ảo KTC. Bạn cần hỗ trợ gì về dự án hoặc bài học hôm nay?"}]
-            st.rerun()
+        # 4. Logo Trường (Footer Sidebar)
+        st.markdown("---")
+        if os.path.exists(AppConfig.LOGO_SCHOOL):
+            st.markdown('<div class="school-logo-container">', unsafe_allow_html=True)
+            st.image(AppConfig.LOGO_SCHOOL, width=120, caption="THCS & THPT Phạm Kiệt")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- MAIN CONTENT ---
+    # --- MAIN UI ---
     
-    # Header nhỏ gọn
-    st.markdown("""
+    # Header ấn tượng
+    st.markdown(f"""
     <div class="main-header">
-        <div>
-            <h1>TRỢ LÝ ẢO KTC</h1>
-            <p>Hệ thống AI hỗ trợ Nghiên cứu Khoa học & Tin học</p>
+        <div class="header-title">
+            <h1>KTC ASSISTANT</h1>
+            <p>Knowledge in Technology & Computer Science</p>
         </div>
-        <div style="font-size: 2rem;">🎓</div>
-    </div>
+        </div>
     """, unsafe_allow_html=True)
 
-    # Init State
+    # Init Session State
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Chào bạn! Mình là trợ lý ảo KTC. Bạn cần hỗ trợ gì về dự án hoặc bài học hôm nay?"}]
+        st.session_state.messages = [
+            {"role": "assistant", "content": "👋 Chào bạn! Mình là KTC Assistant. Mình có thể giúp gì cho bài nghiên cứu hoặc bài tập Tin học của bạn hôm nay?"}
+        ]
     
     if "vector_db" not in st.session_state:
-        kb = KnowledgeBase()
-        st.session_state.vector_db = kb.get_vector_store()
-    
+        with st.spinner("🚀 Đang khởi động hệ thống AI..."):
+            embeddings = load_embedding_model()
+            st.session_state.vector_db = load_vector_db(embeddings)
+
     groq_client = load_groq_client()
 
-    # Render Chat
+    # Hiển thị lịch sử chat
     for msg in st.session_state.messages:
-        avatar = "🧑‍🎓" if msg["role"] == "user" else "🤖"
+        # Avatar tùy chỉnh: Bot dùng logo KTC (nếu có) hoặc icon robot
+        avatar = "🧑‍🎓" if msg["role"] == "user" else (AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖")
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # --- GỢI Ý CÂU HỎI (SUGGESTION CHIPS) ---
-    # Chỉ hiện khi chưa có nhiều hội thoại
-    if len(st.session_state.messages) < 3:
-        st.markdown("Running suggestion chips...") # Debug invisible line
-        col1, col2, col3 = st.columns(3)
-        # Lưu ý: Button trong Streamlit sẽ rerun app. Ta cần xử lý input từ button.
-        suggestion = None
-        if col1.button("📝 Cấu trúc báo cáo KHKT?", use_container_width=True):
-            suggestion = "Hãy cho tôi biết cấu trúc chuẩn của một bài báo cáo KHKT cấp trường."
-        if col2.button("🐍 Python cơ bản?", use_container_width=True):
-            suggestion = "Tổng hợp các kiến thức cơ bản về Python trong Tin học 11."
-        if col3.button("🤖 AI là gì?", use_container_width=True):
-            suggestion = "Giải thích khái niệm Trí tuệ nhân tạo đơn giản nhất."
+    # Gợi ý câu hỏi (Xử lý thông minh không reload xấu)
+    if len(st.session_state.messages) < 2:
+        st.markdown("#### 💡 Gợi ý câu hỏi:")
+        cols = st.columns(3)
+        prompt_from_button = None
+        
+        if cols[0].button("📝 Cấu trúc bài báo cáo?"):
+            prompt_from_button = "Hãy cho tôi dàn ý chi tiết bài báo cáo dự án KHKT."
+        if cols[1].button("🐍 Code Python cơ bản?"):
+            prompt_from_button = "Viết cho tôi một đoạn code Python tính tổng danh sách."
+        if cols[2].button("🏫 Giới thiệu về trường?"):
+            prompt_from_button = "Giới thiệu đôi nét về trường THCS & THPT Phạm Kiệt."
             
-        if suggestion:
-            # Giả lập việc nhập liệu
-            st.session_state.messages.append({"role": "user", "content": suggestion})
+        if prompt_from_button:
+            # Gán vào input giả lập
+            st.session_state.temp_input = prompt_from_button
             st.rerun()
 
-    # --- CHAT INPUT & XỬ LÝ ---
-    # Logic: Ưu tiên lấy từ suggestion nếu có (đã xử lý ở trên qua session state), nếu không thì lấy từ input
-    # Nhưng vì button rerun, ta cần check message cuối cùng xem có phải user không để trigger trả lời
-    
-    prompt = st.chat_input("Nhập câu hỏi của bạn...")
-    
-    # Biến để trigger AI trả lời
-    process_response = False
-    
-    if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        process_response = True
-    elif len(st.session_state.messages) > 0 and st.session_state.messages[-1]["role"] == "user":
-        # Trường hợp vừa click button gợi ý, app rerun, message cuối là user -> cần trả lời
-        process_response = True
-        prompt = st.session_state.messages[-1]["content"]
+    # Xử lý input (từ chat box hoặc từ button gợi ý)
+    if "temp_input" in st.session_state and st.session_state.temp_input:
+        user_input = st.session_state.temp_input
+        del st.session_state.temp_input # Xóa ngay sau khi lấy
+    else:
+        user_input = st.chat_input("Nhập câu hỏi của bạn tại đây...")
 
-    if process_response:
-        if not prompt: prompt = st.session_state.messages[-1]["content"]
-        
-        # Chỉ hiển thị prompt nếu chưa hiển thị (tránh duplicate khi rerun)
-        # (Streamlit chat input tự hiển thị, nhưng button thì không -> đã append vào session)
-        
-        with st.chat_message("assistant", avatar="🤖"):
-            response_holder = st.empty()
+    if user_input:
+        # 1. Hiển thị câu hỏi User
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user", avatar="🧑‍🎓"):
+            st.markdown(user_input)
+
+        # 2. Xử lý trả lời
+        with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
+            response_container = st.empty()
             
-            # Status đẹp hơn
-            with st.status("🔍 KTC đang tra cứu dữ liệu...", expanded=True) as status:
-                st.write("Đang đọc tài liệu PDF...")
-                context, sources = get_context(st.session_state.vector_db, prompt)
-                st.write("Đang tổng hợp câu trả lời...")
-                status.update(label="✅ Đã tìm thấy thông tin!", state="complete", expanded=False)
+            # Hiệu ứng Spinner đẹp
+            with st.spinner("🧠 KTC đang suy nghĩ..."):
+                if not groq_client:
+                    st.error("❌ Chưa kết nối API Groq.")
+                    st.stop()
+                    
+                stream, sources = get_rag_response(groq_client, st.session_state.vector_db, user_input)
             
-            # Stream response
-            full_res = ""
-            if groq_client:
-                for chunk in generate_stream(groq_client, context, prompt):
-                    full_res += chunk
-                    response_holder.markdown(full_res + "▌")
-                response_holder.markdown(full_res)
+            # Streaming text
+            full_response = ""
+            if isinstance(stream, str): # Trường hợp lỗi
+                response_container.error(stream)
+                full_response = stream
             else:
-                st.error("Chưa kết nối được Groq API.")
-
-            # Sources Citation
-            if sources:
-                with st.expander("📚 Nguồn tài liệu tham khảo (Minh chứng)"):
-                    for src in sources:
-                        st.markdown(f"- *{src}*")
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        response_container.markdown(full_response + "▌")
+                response_container.markdown(full_response)
             
-            # Lưu lại câu trả lời AI (nếu chưa lưu)
-            if st.session_state.messages[-1]["role"] != "assistant":
-                st.session_state.messages.append({"role": "assistant", "content": full_res})
+            # Hiển thị nguồn (Minh chứng KHKT)
+            if sources:
+                with st.expander("📚 Nguồn tham khảo (Minh chứng)"):
+                    for src in sources:
+                        st.caption(f"• {src}")
+            
+            # Lưu lịch sử
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 if __name__ == "__main__":
     main()
