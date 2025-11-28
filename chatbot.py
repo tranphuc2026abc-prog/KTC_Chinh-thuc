@@ -206,13 +206,13 @@ def load_embedding_model():
 
 def load_vector_db(embeddings):
     if not embeddings: return None
-    # Load nếu đã có file index, nếu chưa có thì thôi (Học sinh sẽ copy file index vào)
+    # Load nếu đã có file index
     if os.path.exists(AppConfig.VECTOR_DB_PATH):
         try:
             return FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
         except: pass
         
-    # Cơ chế fallback: Nếu chưa có DB thì build từ PDF (chạy lần đầu)
+    # Cơ chế fallback: Build từ PDF nếu cần
     if not os.path.exists(AppConfig.PDF_DIR): return None
     pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
     if not pdf_files: return None
@@ -234,7 +234,6 @@ def load_vector_db(embeddings):
         splitter = RecursiveCharacterTextSplitter(chunk_size=AppConfig.CHUNK_SIZE, chunk_overlap=AppConfig.CHUNK_OVERLAP)
         splits = splitter.split_documents(docs)
         vector_db = FAISS.from_documents(splits, embeddings)
-        # vector_db.save_local(AppConfig.VECTOR_DB_PATH) # Có thể mở lại nếu cần lưu
         return vector_db
     return None
 
@@ -250,12 +249,12 @@ def get_rag_response(client, vector_db, query):
             context_text += f"Content: {content}\nSource: {src} (Page {page})\n\n"
             sources.append(f"{src} - Trang {page}")
 
-    system_prompt = f"""Bạn là KTC Assistant - Trợ lý ảo hỗ trợ học tập trường THCS & THPT Phạm Kiệt.
+    system_prompt = f"""Bạn là KTC Assistant - Trợ lý ảo hỗ trợ học tập môn Tin học (THPT) trường THCS & THPT Phạm Kiệt.
     
     NHIỆM VỤ:
     - Trả lời câu hỏi dựa trên thông tin được cung cấp trong [CONTEXT].
-    - Nếu thông tin không có trong [CONTEXT], hãy dùng kiến thức chung.
-    - Luôn trả lời bằng tiếng Việt, giọng văn thân thiện, khuyến khích học sinh.
+    - Hỗ trợ giải bài tập lập trình Python, CSDL và kiến thức Tin học đại cương.
+    - Luôn trả lời bằng tiếng Việt, giọng văn sư phạm, dễ hiểu.
     
     [CONTEXT]:
     {context_text}
@@ -284,15 +283,15 @@ def main():
         
     inject_custom_css()
     
-    # --- SIDEBAR (ĐÃ CHỈNH SỬA) ---
+    # --- SIDEBAR (ĐÃ CHỈNH SỬA & TỐI ƯU) ---
     with st.sidebar:
-        # 1. Logo Dự án (Căn giữa)
+        # 1. Logo Dự án
         if os.path.exists(AppConfig.LOGO_PROJECT):
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
                 st.image(AppConfig.LOGO_PROJECT, use_container_width=True)
         
-        # 2. Thông tin Dự án (Layout mới)
+        # 2. Thông tin Dự án
         st.markdown("""
         <div class="project-card">
             <div class="project-title">KTC CHATBOT</div>
@@ -312,13 +311,13 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # 3. Công cụ (Đã xóa nút Cập nhật)
+        # 3. Công cụ
         st.markdown("### ⚙️ Tiện ích")
         if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
 
-        # 4. Logo Trường (Footer)
+        # 4. Logo Trường
         st.markdown("---")
         if os.path.exists(AppConfig.LOGO_SCHOOL):
             col1, col2, col3 = st.columns([1, 3, 1])
@@ -332,21 +331,19 @@ def main():
 
     # --- MAIN CONTENT ---
     
-    # Banner Header (Đổ bóng & Bo góc)
     st.markdown(f"""
     <div class="main-header">
         <div class="header-title">
             <h1>KTC ASSISTANT</h1>
         </div>
         <div class="header-subtitle">
-            Knowledge in Technology & Computer Science
+            Hỗ trợ học tập Tin học & Khoa học máy tính
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Init State
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! Mình là KTC Assistant. Mình có thể giúp gì cho bạn hôm nay?"}]
+        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! Mình là trợ lý ảo hỗ trợ môn Tin học. Bạn cần giúp đỡ về Python, CSDL hay kiến thức nào?"}]
     
     if "vector_db" not in st.session_state:
         with st.spinner("🚀 Đang khởi động hệ thống..."):
@@ -355,31 +352,38 @@ def main():
 
     groq_client = load_groq_client()
 
-    # Chat History
     for msg in st.session_state.messages:
         avatar = "🧑‍🎓" if msg["role"] == "user" else (AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖")
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # Gợi ý
+    # --- GỢI Ý CÂU HỎI (ĐÃ CẬP NHẬT CHO TIN HỌC THPT) ---
     if len(st.session_state.messages) < 2:
-        st.markdown("##### 💡 Gợi ý câu hỏi:")
+        st.markdown("##### 💡 Gợi ý câu hỏi ôn tập:")
         cols = st.columns(3)
         prompt_btn = None
-        if cols[0].button("📝 Cấu trúc báo cáo KHKT?"): prompt_btn = "Hãy cho tôi dàn ý chi tiết bài báo cáo dự án KHKT."
-        if cols[1].button("🐍 Viết Code Python?"): prompt_btn = "Viết code Python tính tổng danh sách."
-        if cols[2].button("🏫 Giới thiệu trường?"): prompt_btn = "Giới thiệu về trường THCS & THPT Phạm Kiệt."
+        
+        # Câu 1: Lập trình Python (Lớp 10/11)
+        if cols[0].button("🐍 Python: Số nguyên tố"):
+            prompt_btn = "Viết chương trình Python nhập vào một số nguyên n và kiểm tra xem n có phải là số nguyên tố hay không."
+            
+        # Câu 2: Cơ sở dữ liệu (Lớp 11)
+        if cols[1].button("🗃️ CSDL: Khóa chính"):
+            prompt_btn = "Giải thích khái niệm Khóa chính (Primary Key) trong Cơ sở dữ liệu quan hệ và cho ví dụ minh họa."
+            
+        # Câu 3: Luật & Xã hội (Lớp 10)
+        if cols[2].button("⚖️ Luật An ninh mạng"):
+            prompt_btn = "Nêu các hành vi bị nghiêm cấm theo Luật An ninh mạng Việt Nam. Học sinh cần làm gì để tuân thủ?"
         
         if prompt_btn:
             st.session_state.temp_input = prompt_btn
             st.rerun()
 
-    # Input handling
     if "temp_input" in st.session_state and st.session_state.temp_input:
         user_input = st.session_state.temp_input
         del st.session_state.temp_input
     else:
-        user_input = st.chat_input("Nhập câu hỏi của bạn...")
+        user_input = st.chat_input("Nhập câu hỏi Tin học của bạn...")
 
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
@@ -405,7 +409,7 @@ def main():
                 response_placeholder.markdown(full_response)
             
             if sources:
-                with st.expander("📚 Nguồn minh chứng"):
+                with st.expander("📚 Tài liệu tham khảo (SGK/Chuyên đề)"):
                     for src in sources: st.caption(f"• {src}")
             
             st.session_state.messages.append({"role": "assistant", "content": full_response})
