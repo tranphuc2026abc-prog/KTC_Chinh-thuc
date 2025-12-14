@@ -219,7 +219,6 @@ class UIManager:
 # ==============================================================================
 
 class RAGEngine:
-    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_groq_client():
@@ -231,7 +230,6 @@ class RAGEngine:
         except Exception:
             return None
 
-    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_embedding_model():
@@ -245,7 +243,6 @@ class RAGEngine:
             st.error(f"Lỗi tải Embedding Model: {e}")
             return None
 
-    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_reranker():
@@ -255,7 +252,20 @@ class RAGEngine:
             st.warning(f"Lỗi tải Reranker (fallback không rerank): {e}")
             return None
 
-    # Hàm này đã được sửa
+    # Detect topic per chunk
+    @staticmethod
+    def _detect_topic(text: str) -> str:
+        tx = (text or "").lower()
+        if any(tag in tx for tag in ["<html", "<head", "<body", "css", "javascript", "<title", "<div", "<span"]):
+            return "html"
+        if any(p in tx for p in ["def ", "import ", "for ", "while ", "list", "tuple", "dict", "print(", "input("]):
+            return "python"
+        if any(d in tx for d in ["sql", "khóa chính", "primary key", "foreign key", "cơ sở dữ liệu", "bảng", "quan hệ"]):
+            return "database"
+        if any(s in tx for s in ["an ninh mạng", "bảo mật", "an toàn thông tin", "mạng xã hội", "tin giả"]):
+            return "security"
+        return "general"
+
     @staticmethod
     def _read_source_files(pdf_dir: str) -> List[Document]:
         """Đọc PDF/TXT thành Document thô, đính metadata nguồn + trang."""
@@ -279,7 +289,7 @@ class RAGEngine:
                                 metadata={"source": source_file, "page": page_num + 1, "title": source_name}
                             ))
                 else:
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         text = f.read().strip()
                         if text:
                             docs.append(Document(
@@ -290,16 +300,15 @@ class RAGEngine:
                 continue
         return docs
 
-    # Hàm này đã được sửa
     @staticmethod
     def _chunk_documents(docs: List[Document]) -> List[Document]:
-        """Chunk-level chuẩn, giữ trace: source/page/chunk_id."""
+        """Chunk-level chuẩn, giữ trace: source/page/chunk_id + topic."""
         if not docs:
             return []
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=AppConfig.CHUNK_SIZE,
             chunk_overlap=AppConfig.CHUNK_OVERLAP,
-            separators=["\n\n", "\n", ". ", " ", ""],  # giảm rủi ro cắt giữa câu
+            separators=["\n\n", "\n", ". ", " ", ""],
             add_start_index=True
         )
         chunks: List[Document] = []
@@ -308,12 +317,11 @@ class RAGEngine:
             for i, sd in enumerate(split_docs):
                 meta = dict(d.metadata)
                 meta["chunk_id"] = f"{meta.get('source','unk')}#p{meta.get('page','?')}#c{i}"
-                # chuẩn hóa nội dung chunk
                 content = sd.page_content.replace("\u0000", "").strip()
+                meta["topic"] = RAGEngine._detect_topic(content)
                 chunks.append(Document(page_content=content, metadata=meta))
         return chunks
 
-    # Hàm này đã được sửa
     @staticmethod
     def build_hybrid_retriever(embeddings):
         """
@@ -373,7 +381,6 @@ class RAGEngine:
             # Fallback về vector thường nếu lỗi
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
-    # Hàm này đã được sửa
     @staticmethod
     def process_multimodal(client, uploaded_file):
         vision_desc = ""
@@ -417,7 +424,6 @@ class RAGEngine:
                 audio_text = "Lỗi nghe âm thanh."
         return vision_desc, audio_text
 
-    # Hàm này đã được sửa
     @staticmethod
     def _format_context_for_llm(final_docs: List[Document]) -> Tuple[str, List[str], Dict[str, str]]:
         """
@@ -434,15 +440,15 @@ class RAGEngine:
             src = doc.metadata.get('source', 'Tài liệu')
             page = doc.metadata.get('page', 'Unknown')
             chunk_id = doc.metadata.get('chunk_id', f"{src}#p{page}#c{idx}")
+            topic = doc.metadata.get('topic', 'general')
             label = f"[S{idx+1}]"
             cite_map[chunk_id] = label
-            # Mỗi chunk là một đơn vị citation độc lập
             content = doc.page_content.replace("\n", " ").strip()
-            context_text.append(f"{label} | {src} | Trang {page}\n{content}\n---")
-            source_labels.append(f"{src} - Trang {page} ({label})")
+            # Hiển thị topic để người đọc hiểu đơn vị trích dẫn
+            context_text.append(f"{label} | {src} | Chủ đề: {topic} | Trang {page}\n{content}\n---")
+            source_labels.append(f"{src} - Trang {page} ({label}, {topic})")
         return "\n".join(context_text), source_labels, cite_map
 
-    # Hàm này đã được sửa
     @staticmethod
     def _controlled_refusal_message() -> str:
         return (
@@ -450,11 +456,11 @@ class RAGEngine:
             "Bạn có thể hỏi lại rõ hơn hoặc kiểm tra tài liệu liên quan."
         )
 
-    # Hàm này đã được sửa
     @staticmethod
     def generate_response(client, retriever, query, vision_context=None):
         """
         - Retrieval (Hybrid + MMR)
+        - Soft-filter theo chủ đề/lớp từ câu hỏi
         - Rerank (FlashRank)
         - Chunk-level citation [S1], [S2]... ép inline
         - Từ chối có kiểm soát nếu không có ngữ cảnh
@@ -462,9 +468,46 @@ class RAGEngine:
         """
         # 1. Retrieval
         final_docs: List[Document] = []
+        initial_docs: List[Document] = []
+
+        def infer_intent(q: str):
+            ql = (q or "").lower()
+            grade_hint = "12" if ("12" in ql or "lớp 12" in ql) else \
+                         "11" if ("11" in ql or "lớp 11" in ql) else \
+                         "10" if ("10" in ql or "lớp 10" in ql) else None
+            topic_hint = "html" if ("html" in ql or "css" in ql) else \
+                         "python" if "python" in ql else \
+                         "database" if ("sql" in ql or "cơ sở dữ liệu" in ql or "csdl" in ql) else \
+                         "security" if ("an ninh" in ql or "bảo mật" in ql) else None
+            return grade_hint, topic_hint
+
+        grade_hint, topic_hint = infer_intent(query)
+
+        def soft_filter(docs: List[Document]) -> List[Document]:
+            if not docs:
+                return []
+            def score(d: Document) -> int:
+                s = 0
+                md = d.metadata or {}
+                # Ưu tiên đúng chủ đề/lớp nếu đoán được
+                if grade_hint and md.get("title", "").lower().find(grade_hint) != -1:
+                    s += 2
+                if grade_hint and md.get("source", "").lower().find(grade_hint) != -1:
+                    s += 1
+                if topic_hint and md.get("topic") == topic_hint:
+                    s += 3
+                # Heuristic cho HTML: có tag
+                pc = (d.page_content or "").lower()
+                if topic_hint == "html" and any(tag in pc for tag in ["<html", "<head", "<body", "css", "javascript"]):
+                    s += 1
+                return s
+            return sorted(docs, key=score, reverse=True)[:max(AppConfig.RETRIEVAL_K, 12)]
+
         if retriever:
             try:
-                initial_docs: List[Document] = retriever.invoke(query) or []
+                initial_docs = retriever.invoke(query) or []
+                # Áp dụng soft-filter theo topic/lớp trước rerank
+                initial_docs = soft_filter(initial_docs)
             except Exception:
                 initial_docs = []
 
@@ -485,7 +528,7 @@ class RAGEngine:
         # Nếu không có doc phù hợp → từ chối
         if not final_docs:
             refusal_text = RAGEngine._controlled_refusal_message()
-            return [refusal_text], []  # trả về dạng list để nhảy qua stream loop
+            return [refusal_text], []
 
         # 3. Tạo ngữ cảnh + citation map
         context_text, source_labels, cite_map = RAGEngine._format_context_for_llm(final_docs)
@@ -525,7 +568,6 @@ YÊU CẦU BẮT BUỘC:
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=AppConfig.LLM_MAX_TOKENS
             )
-            # Hiển thị nguồn dưới expander (UI giữ nguyên, chỉ nội dung)
             unique_sources = source_labels
             return stream, unique_sources
         except Exception as e:
@@ -625,7 +667,6 @@ def main():
                 else:
                     try:
                         for chunk in stream:
-                            # phòng null delta
                             delta = getattr(chunk.choices[0].delta, "content", None)
                             if delta:
                                 full_response += delta
