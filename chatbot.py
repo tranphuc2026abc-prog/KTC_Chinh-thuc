@@ -4,18 +4,19 @@ import base64
 import streamlit as st
 import shutil
 from pathlib import Path
+from typing import List, Tuple, Optional, Dict
 
 # --- Imports với xử lý lỗi ---
 try:
     from pypdf import PdfReader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
-    from langchain_community.retrievers import BM25Retriever # [NEW] Hybrid Search
-    from langchain.retrievers import EnsembleRetriever       # [NEW] Hybrid Search
+    from langchain_community.retrievers import BM25Retriever  # Hybrid Search
+    from langchain.retrievers import EnsembleRetriever        # Hybrid Search
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     from groq import Groq
-    # [NÂNG CẤP] Thư viện Rerank
+    # Rerank
     from flashrank import Ranker, RerankRequest
     DEPENDENCIES_OK = True
 except ImportError as e:
@@ -36,29 +37,34 @@ st.set_page_config(
 class AppConfig:
     # Model Config
     LLM_MODEL = 'llama-3.1-8b-instant'
-    LLM_VISION_MODEL = 'llama-3.2-11b-vision-preview' # [NEW] Model nhìn ảnh
-    LLM_AUDIO_MODEL = 'whisper-large-v3'              # [NEW] Model nghe
-    
+    LLM_VISION_MODEL = 'llama-3.2-11b-vision-preview'  # Model nhìn ảnh
+    LLM_AUDIO_MODEL = 'whisper-large-v3'               # Model nghe
+
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    
-    # [NÂNG CẤP] Model Rerank nhỏ nhẹ, chạy tốt trên CPU
+
+    # Model Rerank nhỏ, chạy tốt trên CPU
     RERANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
-    
+
     # Paths
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
-    RERANK_CACHE = "./opt" # Nơi lưu cache model rerank
-    
+    RERANK_CACHE = "./opt"  # Cache model rerank
+
     # Assets
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
-    
+
     # RAG Parameters
-    CHUNK_SIZE = 800        # [TWEAK] Giảm nhẹ size để đoạn văn tập trung hơn
-    CHUNK_OVERLAP = 150     
-    RETRIEVAL_K = 20        # Lấy rộng để lọc
-    FINAL_K = 5             # Lấy tinh
-    RETRIEVAL_TYPE = "mmr" 
+    CHUNK_SIZE = 700       # tinh hơn, tránh lan man
+    CHUNK_OVERLAP = 120    # vừa đủ nối mạch ngữ nghĩa
+    RETRIEVAL_K = 24       # lấy rộng trước
+    FINAL_K = 6            # lọc tinh sau rerank
+    MMR_FETCH_K = 50       # số doc thô để MMR đa dạng
+    MMR_LAMBDA = 0.6       # trade-off relevance/diversity
+
+    # LLM gen
+    LLM_TEMPERATURE = 0.2
+    LLM_MAX_TOKENS = 1400
 
 # ==============================================================================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER) - GIỮ NGUYÊN 100% NHƯ CŨ
@@ -147,7 +153,7 @@ class UIManager:
                 with col2:
                     st.image(AppConfig.LOGO_SCHOOL, use_container_width=True)
                 st.markdown("<div style='text-align:center; font-weight:700; color:#023e8a; margin-bottom:20px;'>THCS & THPT PHẠM KIỆT</div>", unsafe_allow_html=True)
-            
+
             st.markdown("""
             <div class="project-card">
                 <div class="project-title">KTC CHATBOT</div>
@@ -169,8 +175,8 @@ class UIManager:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
-            # [NÂNG CẤP NGẦM] Thêm phần upload file nhưng giấu gọn trong Expander để không rối UI
+
+            # Expander upload giữ nguyên
             with st.expander("📂 Tính năng nâng cao (AI Vision)", expanded=False):
                 st.markdown("<small>Tải ảnh lỗi code hoặc file ghi âm câu hỏi</small>", unsafe_allow_html=True)
                 uploaded_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'mp3', 'wav', 'py'], key="multimodal_upload")
@@ -183,12 +189,12 @@ class UIManager:
                 st.session_state.messages = []
                 st.session_state.uploaded_file_obj = None
                 st.rerun()
-            
+
             # Nút Rebuild DB
             if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
                 if os.path.exists(AppConfig.VECTOR_DB_PATH):
                     shutil.rmtree(AppConfig.VECTOR_DB_PATH)
-                st.session_state.pop('retriever_engine', None) # Clear cache
+                st.session_state.pop('retriever_engine', None)  # Clear cache
                 st.rerun()
 
     @staticmethod
@@ -213,15 +219,19 @@ class UIManager:
 # ==============================================================================
 
 class RAGEngine:
+    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_groq_client():
         try:
             api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
-            if not api_key: return None
+            if not api_key:
+                return None
             return Groq(api_key=api_key)
-        except: return None
+        except Exception:
+            return None
 
+    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_embedding_model():
@@ -235,23 +245,83 @@ class RAGEngine:
             st.error(f"Lỗi tải Embedding Model: {e}")
             return None
 
+    # Hàm này đã được sửa
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_reranker():
         try:
             return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
         except Exception as e:
-            print(f"Lỗi tải Reranker: {e}")
+            st.warning(f"Lỗi tải Reranker (fallback không rerank): {e}")
             return None
 
+    # Hàm này đã được sửa
+    @staticmethod
+    def _read_source_files(pdf_dir: str) -> List[Document]:
+        """Đọc PDF/TXT thành Document thô, đính metadata nguồn + trang."""
+        pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
+        txt_files = glob.glob(os.path.join(pdf_dir, "*.txt"))
+        all_files = pdf_files + txt_files
+
+        docs: List[Document] = []
+        for file_path in all_files:
+            try:
+                source_file = os.path.basename(file_path)
+                source_name = source_file.replace('.pdf', '').replace('.txt', '').replace('_', ' ')
+                if file_path.endswith('.pdf'):
+                    reader = PdfReader(file_path)
+                    for page_num, page in enumerate(reader.pages):
+                        text = page.extract_text()
+                        if text and len(text.strip()) > 50:
+                            clean_text = text.replace('\x00', '').strip()
+                            docs.append(Document(
+                                page_content=clean_text,
+                                metadata={"source": source_file, "page": page_num + 1, "title": source_name}
+                            ))
+                else:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        text = f.read().strip()
+                        if text:
+                            docs.append(Document(
+                                page_content=text,
+                                metadata={"source": source_file, "page": 1, "title": source_name}
+                            ))
+            except Exception:
+                continue
+        return docs
+
+    # Hàm này đã được sửa
+    @staticmethod
+    def _chunk_documents(docs: List[Document]) -> List[Document]:
+        """Chunk-level chuẩn, giữ trace: source/page/chunk_id."""
+        if not docs:
+            return []
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=AppConfig.CHUNK_SIZE,
+            chunk_overlap=AppConfig.CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""],  # giảm rủi ro cắt giữa câu
+            add_start_index=True
+        )
+        chunks: List[Document] = []
+        for d in docs:
+            split_docs = splitter.split_documents([d])
+            for i, sd in enumerate(split_docs):
+                meta = dict(d.metadata)
+                meta["chunk_id"] = f"{meta.get('source','unk')}#p{meta.get('page','?')}#c{i}"
+                # chuẩn hóa nội dung chunk
+                content = sd.page_content.replace("\u0000", "").strip()
+                chunks.append(Document(page_content=content, metadata=meta))
+        return chunks
+
+    # Hàm này đã được sửa
     @staticmethod
     def build_hybrid_retriever(embeddings):
         """
-        [NÂNG CẤP KHKT] Xây dựng Hybrid Search (BM25 + FAISS)
+        Xây dựng Hybrid Search (BM25 + FAISS) ổn định, có MMR.
         """
-        if not embeddings: return None
+        if not embeddings:
+            return None
 
-        # 1. Load hoặc Tạo FAISS
         vector_db = None
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
@@ -259,161 +329,191 @@ class RAGEngine:
             except Exception as e:
                 st.warning(f"Reload DB lỗi: {e}")
 
-        # Nếu chưa có DB thì tạo mới
         if not vector_db:
             if not os.path.exists(AppConfig.PDF_DIR):
                 st.error(f"⚠️ Thư mục '{AppConfig.PDF_DIR}' không tồn tại!")
                 return None
 
-            pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
-            txt_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.txt"))
-            all_files = pdf_files + txt_files
-            
-            docs = []
-            status_text = st.empty()
-            status_text.info(f"📚 Đang số hóa {len(all_files)} tài liệu. Vui lòng đợi...")
-
-            for file_path in all_files:
-                try:
-                    source_name = os.path.basename(file_path).replace('.pdf', '').replace('.txt', '').replace('_', ' ')
-                    content = ""
-                    if file_path.endswith('.pdf'):
-                        reader = PdfReader(file_path)
-                        for page_num, page in enumerate(reader.pages):
-                            text = page.extract_text()
-                            if text and len(text.strip()) > 50:
-                                clean_text = text.replace('\x00', '')
-                                context_content = f"Tài liệu môn: {source_name}\nNội dung: {clean_text}"
-                                docs.append(Document(page_content=context_content, metadata={"source": os.path.basename(file_path), "page": page_num + 1}))
-                    elif file_path.endswith('.txt'):
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            text = f.read()
-                            if text:
-                                context_content = f"Tài liệu môn: {source_name}\nNội dung: {text}"
-                                docs.append(Document(page_content=context_content, metadata={"source": os.path.basename(file_path), "page": 1}))
-                except: continue
-
-            if docs:
-                splitter = RecursiveCharacterTextSplitter(chunk_size=AppConfig.CHUNK_SIZE, chunk_overlap=AppConfig.CHUNK_OVERLAP)
-                splits = splitter.split_documents(docs)
-                vector_db = FAISS.from_documents(splits, embeddings)
-                vector_db.save_local(AppConfig.VECTOR_DB_PATH)
-                status_text.empty()
-            else:
+            status = st.empty()
+            raw_docs = RAGEngine._read_source_files(AppConfig.PDF_DIR)
+            status.info(f"📚 Đang số hóa {len(raw_docs)} tài liệu. Vui lòng đợi...")
+            chunk_docs = RAGEngine._chunk_documents(raw_docs)
+            if not chunk_docs:
+                status.empty()
+                st.error("Không có dữ liệu hợp lệ để xây Vector DB.")
                 return None
-        
-        # 2. Tạo Hybrid Retriever (BM25 + FAISS)
-        # Để tiết kiệm thời gian demo, ta tạo BM25 từ documents trong vector store
+
+            # Tạo FAISS từ chunk-level để citation traceable
+            vector_db = FAISS.from_documents(chunk_docs, embeddings)
+            vector_db.save_local(AppConfig.VECTOR_DB_PATH)
+            status.empty()
+
         try:
+            # BM25 từ toàn bộ docstore (chunk-level)
             docstore_docs = list(vector_db.docstore._dict.values())
             bm25_retriever = BM25Retriever.from_documents(docstore_docs)
             bm25_retriever.k = AppConfig.RETRIEVAL_K
-            
-            faiss_retriever = vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
-            
-            # Kết hợp tỷ lệ 50-50
+
+            # FAISS retriever với MMR để đa dạng
+            faiss_retriever = vector_db.as_retriever(
+                search_type="mmr",
+                search_kwargs={
+                    "k": AppConfig.RETRIEVAL_K,
+                    "fetch_k": AppConfig.MMR_FETCH_K,
+                    "lambda_mult": AppConfig.MMR_LAMBDA
+                }
+            )
+
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[bm25_retriever, faiss_retriever],
                 weights=[0.4, 0.6]
             )
             return ensemble_retriever
-        except Exception as e:
+        except Exception:
             # Fallback về vector thường nếu lỗi
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
-    # [NÂNG CẤP] Xử lý input đa phương thức
+    # Hàm này đã được sửa
     @staticmethod
     def process_multimodal(client, uploaded_file):
         vision_desc = ""
         audio_text = ""
-        
+
         if uploaded_file.type.startswith('image'):
-            # Xử lý ảnh bằng Llama-3.2-Vision
             base64_image = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
             try:
                 resp = client.chat.completions.create(
                     model=AppConfig.LLM_VISION_MODEL,
                     messages=[{
-                        "role": "user", 
+                        "role": "user",
                         "content": [
                             {"type": "text", "text": "Mô tả chi tiết code hoặc nội dung trong ảnh này."},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                         ]
                     }]
                 )
-                vision_desc = resp.choices[0].message.content
-            except: vision_desc = "Lỗi đọc ảnh."
-            
+                vision_desc = resp.choices[0].message.content or ""
+            except Exception:
+                vision_desc = "Lỗi đọc ảnh."
         elif uploaded_file.type.startswith('audio'):
-            # Xử lý âm thanh bằng Whisper
             try:
-                # Cần lưu file tạm
-                with open("temp_audio.mp3", "wb") as f: f.write(uploaded_file.getbuffer())
-                with open("temp_audio.mp3", "rb") as f:
+                tmp = "temp_audio_input"
+                suffix = ".mp3" if uploaded_file.type.endswith("mpeg") or uploaded_file.type.endswith("mp3") else ".wav"
+                temp_path = f"{tmp}{suffix}"
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                with open(temp_path, "rb") as f:
                     transcription = client.audio.transcriptions.create(
-                        file=("temp_audio.mp3", f.read()),
+                        file=(os.path.basename(temp_path), f.read()),
                         model=AppConfig.LLM_AUDIO_MODEL,
                         response_format="text"
                     )
-                audio_text = transcription
-            except: audio_text = "Lỗi nghe âm thanh."
-            
+                audio_text = transcription or ""
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            except Exception:
+                audio_text = "Lỗi nghe âm thanh."
         return vision_desc, audio_text
 
+    # Hàm này đã được sửa
+    @staticmethod
+    def _format_context_for_llm(final_docs: List[Document]) -> Tuple[str, List[str], Dict[str, str]]:
+        """
+        Tạo [NGỮ CẢNH] chuẩn, chunk-level, và mapping citation ID -> label [S1]...
+        Trả về:
+          - context_text: block văn bản cho LLM
+          - source_labels: danh sách hiển thị dưới expander
+          - cite_map: dict {chunk_id: "[S#]"}
+        """
+        context_text = []
+        source_labels = []
+        cite_map: Dict[str, str] = {}
+        for idx, doc in enumerate(final_docs):
+            src = doc.metadata.get('source', 'Tài liệu')
+            page = doc.metadata.get('page', 'Unknown')
+            chunk_id = doc.metadata.get('chunk_id', f"{src}#p{page}#c{idx}")
+            label = f"[S{idx+1}]"
+            cite_map[chunk_id] = label
+            # Mỗi chunk là một đơn vị citation độc lập
+            content = doc.page_content.replace("\n", " ").strip()
+            context_text.append(f"{label} | {src} | Trang {page}\n{content}\n---")
+            source_labels.append(f"{src} - Trang {page} ({label})")
+        return "\n".join(context_text), source_labels, cite_map
+
+    # Hàm này đã được sửa
+    @staticmethod
+    def _controlled_refusal_message() -> str:
+        return (
+            "Mình không tìm thấy thông tin phù hợp trong tài liệu đã cung cấp, nên không thể trả lời câu hỏi này. "
+            "Bạn có thể hỏi lại rõ hơn hoặc kiểm tra tài liệu liên quan."
+        )
+
+    # Hàm này đã được sửa
     @staticmethod
     def generate_response(client, retriever, query, vision_context=None):
-        context_text = ""
-        sources = []
-        
-        # 1. Retrieval (Hybrid)
+        """
+        - Retrieval (Hybrid + MMR)
+        - Rerank (FlashRank)
+        - Chunk-level citation [S1], [S2]... ép inline
+        - Từ chối có kiểm soát nếu không có ngữ cảnh
+        - Stream ổn định
+        """
+        # 1. Retrieval
+        final_docs: List[Document] = []
         if retriever:
-            initial_docs = retriever.invoke(query)
-            
-            # 2. Rerank (FlashRank)
-            final_docs = []
+            try:
+                initial_docs: List[Document] = retriever.invoke(query) or []
+            except Exception:
+                initial_docs = []
+
+            # 2. Rerank
             try:
                 ranker = RAGEngine.load_reranker()
                 if ranker and initial_docs:
-                    passages = [{"id": str(i), "text": doc.page_content, "meta": doc.metadata} for i, doc in enumerate(initial_docs)]
+                    passages = [{"id": str(i), "text": d.page_content, "meta": d.metadata} for i, d in enumerate(initial_docs)]
                     rerank_request = RerankRequest(query=query, passages=passages)
                     ranked_results = ranker.rank(rerank_request)
-                    top_results = ranked_results[:AppConfig.FINAL_K]
-                    for res in top_results:
-                        final_docs.append(Document(page_content=res['text'], metadata=res['meta']))
-                else: final_docs = initial_docs[:AppConfig.FINAL_K]
-            except: final_docs = initial_docs[:AppConfig.FINAL_K]
+                    for res in ranked_results[:AppConfig.FINAL_K]:
+                        final_docs.append(Document(page_content=res["text"], metadata=res["meta"]))
+                else:
+                    final_docs = initial_docs[:AppConfig.FINAL_K]
+            except Exception:
+                final_docs = initial_docs[:AppConfig.FINAL_K]
 
-            # Tạo ngữ cảnh
-            for doc in final_docs:
-                src = doc.metadata.get('source', 'Tài liệu')
-                page = doc.metadata.get('page', 'Unknown')
-                content = doc.page_content.replace("\n", " ").strip()
-                context_text += f"""
-                ---
-                [Tài liệu: {src}, Trang: {page}]
-                {content}
-                ---
-                """
-                sources.append(f"{src} - Trang {page}")
+        # Nếu không có doc phù hợp → từ chối
+        if not final_docs:
+            refusal_text = RAGEngine._controlled_refusal_message()
+            return [refusal_text], []  # trả về dạng list để nhảy qua stream loop
 
-        # Prompt đặc biệt cho giáo viên
+        # 3. Tạo ngữ cảnh + citation map
+        context_text, source_labels, cite_map = RAGEngine._format_context_for_llm(final_docs)
+
+        # 4. Prompt ép trích dẫn, không suy diễn
         extra_instruct = ""
         if vision_context:
-            extra_instruct = f"Học sinh có gửi kèm ảnh/code với nội dung mô tả là: '{vision_context}'. Hãy dùng thông tin này kết hợp với ngữ cảnh SGK để giải thích."
+            extra_instruct = (
+                f"Học sinh có gửi kèm ảnh/code mô tả: '{vision_context}'. "
+                "Chỉ dùng thông tin này để hỗ trợ diễn giải trong phạm vi [NGỮ CẢNH]."
+            )
 
         system_prompt = f"""Bạn là KTC Chatbot - Trợ lý AI giáo dục của trường Phạm Kiệt.
-        
-        NHIỆM VỤ:
-        1. Trả lời câu hỏi dựa CHÍNH XÁC vào [NGỮ CẢNH] bên dưới.
-        2. Nếu là câu hỏi bài tập code: Chỉ gợi ý hướng giải, giải thích lỗi, KHÔNG viết code giải sẵn hoàn toàn (để học sinh tự tư duy).
-        3. Nếu thông tin có trong ngữ cảnh, hãy trích dẫn nguồn cuối câu trả lời theo định dạng [Tên_File.pdf - Trang X].
-        
-        {extra_instruct}
-        
-        [NGỮ CẢNH]:
-        {context_text}
-        """
 
+YÊU CẦU BẮT BUỘC:
+- Chỉ trả lời dựa trên [NGỮ CẢNH] bên dưới. Không thêm kiến thức ngoài.
+- Mỗi ý chính phải kèm citation inline theo dạng [S1], [S2]... tương ứng từng đoạn trong [NGỮ CẢNH].
+- Không gộp nguồn, không đổi định dạng citation, không dùng [Tên_File - Trang X] trong nội dung. Chỉ dùng [S#].
+- Nếu là bài tập code: chỉ gợi ý hướng, giải thích lỗi; không viết trọn lời giải.
+- Nếu [NGỮ CẢNH] không chứa thông tin cần thiết: trả lời từ chối một cách lịch sự, ngắn gọn.
+
+{extra_instruct}
+
+[NGỮ CẢNH]
+{context_text}
+"""
+
+        # 5. Gọi LLM với stream
         try:
             stream = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
@@ -422,13 +522,14 @@ class RAGEngine:
                     {"role": "user", "content": query}
                 ],
                 stream=True,
-                temperature=0.3,
-                max_tokens=2000
+                temperature=AppConfig.LLM_TEMPERATURE,
+                max_tokens=AppConfig.LLM_MAX_TOKENS
             )
-            unique_sources = sorted(list(set(sources)))
+            # Hiển thị nguồn dưới expander (UI giữ nguyên, chỉ nội dung)
+            unique_sources = source_labels
             return stream, unique_sources
         except Exception as e:
-            return f"Lỗi kết nối AI: {str(e)}", []
+            return [f"Lỗi kết nối AI: {str(e)}"], []
 
 # ==============================================================================
 # 4. MAIN APPLICATION
@@ -439,16 +540,16 @@ def main():
         st.error(f"⚠️ Lỗi thư viện: {IMPORT_ERROR}")
         st.info("Vui lòng chạy lệnh: pip install flashrank rank_bm25")
         st.stop()
-        
+
     UIManager.inject_custom_css()
     UIManager.render_sidebar()
     UIManager.render_header()
 
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! Mình là KTC Chatbot. Bạn cần hỗ trợ bài tập Tin học phần nào?"}]
-    
+
     groq_client = RAGEngine.load_groq_client()
-    
+
     # Init Retriever (Hybrid)
     if "retriever_engine" not in st.session_state:
         with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Hybrid)..."):
@@ -491,41 +592,53 @@ def main():
 
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
-            
+
             if not groq_client:
                 st.error("❌ Chưa cấu hình API Key.")
             else:
-                # [LOGIC MỚI] Kiểm tra Multimodal Input
+                # Kiểm tra Multimodal Input
                 vision_context = None
                 if "uploaded_file_obj" in st.session_state and st.session_state.uploaded_file_obj:
                     with st.status("🖼️ Đang phân tích file...", expanded=False):
                         vision_desc, audio_text = RAGEngine.process_multimodal(groq_client, st.session_state.uploaded_file_obj)
-                        
-                        if audio_text: # Nếu là voice
+
+                        if audio_text:
                             user_input = f"{user_input} (Nội dung ghi âm: {audio_text})"
                             st.info(f"🎙️ Đã nghe: {audio_text}")
-                        
-                        if vision_desc: # Nếu là ảnh
+
+                        if vision_desc:
                             vision_context = vision_desc
 
                 # Generate Response
-                stream, sources = RAGEngine.generate_response(groq_client, st.session_state.retriever_engine, user_input, vision_context)
-                
+                stream, sources = RAGEngine.generate_response(
+                    groq_client,
+                    st.session_state.retriever_engine,
+                    user_input,
+                    vision_context
+                )
+
                 full_response = ""
-                if isinstance(stream, str):
-                    response_placeholder.error(stream)
-                else:
-                    for chunk in stream:
-                        if chunk.choices[0].delta.content:
-                            full_response += chunk.choices[0].delta.content
-                            response_placeholder.markdown(full_response + "▌")
+                # Stream ổn định: nếu stream là list -> hiển thị ngay (dạng lỗi/từ chối)
+                if isinstance(stream, list):
+                    full_response = stream[0] if stream else "Đã xảy ra lỗi không xác định."
                     response_placeholder.markdown(full_response)
-                
+                else:
+                    try:
+                        for chunk in stream:
+                            # phòng null delta
+                            delta = getattr(chunk.choices[0].delta, "content", None)
+                            if delta:
+                                full_response += delta
+                                response_placeholder.markdown(full_response + "▌")
+                        response_placeholder.markdown(full_response)
+                    except Exception as e:
+                        response_placeholder.error(f"Lỗi stream: {e}")
+
                 if sources:
                     with st.expander("📚 Tài liệu tham khảo (Đã kiểm chứng)"):
                         for src in sources:
                             st.markdown(f"- 📖 *{src}*")
-                
+
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
                 # Reset file upload sau khi trả lời xong
                 if "uploaded_file_obj" in st.session_state and st.session_state.uploaded_file_obj:
