@@ -1,33 +1,17 @@
-# Core Framework
 streamlit>=1.30.0
 rank_bm25>=0.2.2
-rank_bm25>=0.2.2
 openai-whisper>=20231117
-# PDF Processing
-pypdf>=4.0.0
-
-# LangChain Ecosystem
 langchain>=0.1.0
 langchain-community>=0.0.20
 langchain-huggingface>=0.0.1
 langchain-text-splitters>=0.0.1
-
-# Vector Store
 faiss-cpu>=1.7.4
-
-# Embeddings & NLP
 sentence-transformers>=2.2.2
 transformers>=4.30.0
-
-# LLM API
 groq>=0.4.0
-
-# Rerank (NÂNG CẤP QUAN TRỌNG - Giúp lọc tài liệu chuẩn hơn)
 flashrank>=0.2.0
-
-# Utilities
 watchdog>=3.0.0
 numpy<2.0.0
-
-# Optional
-# sentencepiece>=0.1.99
+# --- THÊM MỚI ---
+llama-parse
+nest_asyncio
