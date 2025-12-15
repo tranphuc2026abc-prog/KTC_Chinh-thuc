@@ -254,7 +254,6 @@ class RAGEngine:
         except Exception as e:
             return None
 
-    # [NEW] Hàm phân loại tài liệu dựa trên tên file để hiển thị citation đẹp hơn
     @staticmethod
     def _detect_doc_type(source_name: str) -> str:
         name_lower = source_name.lower()
@@ -276,15 +275,9 @@ class RAGEngine:
 
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        """
-        FIXED (Thầy Khanh Request): 
-        Sử dụng REGEX mạnh để bắt các header tiếng Việt trong SGK (Chương, Bài)
-        thay vì chỉ dựa vào Markdown (#).
-        """
         lines = text.split('\n')
         chunks = []
         
-        # Default values (Placeholder)
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
@@ -292,17 +285,11 @@ class RAGEngine:
         buffer = []
 
         # --- REGEX PATTERNS CHO SGK VIỆT NAM ---
-        # Bắt: "CHƯƠNG I", "Chương 1", "CHƯƠNG III." (Bất chấp hoa thường, bold, heading)
         p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
-        
-        # Bắt: "BÀI 1", "Bài 2", "BÀI 10:"
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
-        
-        # Bắt Section con: "1.", "I.", "a)" hoặc Markdown ###
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
 
         def clean_header(text):
-            # Loại bỏ các ký tự Markdown thừa để Metadata sạch đẹp
             return text.replace('#', '').replace('*', '').strip()
 
         def commit_chunk(buf, meta):
@@ -318,7 +305,6 @@ class RAGEngine:
                 "chapter": current_chapter,
                 "lesson": current_lesson,
                 "section": current_section,
-                # Tạo context string để LLM hiểu vị trí kiến thức
                 "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
@@ -329,12 +315,11 @@ class RAGEngine:
             line_stripped = line.strip()
             if not line_stripped: continue
             
-            # Ưu tiên check Regex trước
             if p_chapter.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
-                current_lesson = "Tổng quan chương" # Reset lesson khi qua chương mới
+                current_lesson = "Tổng quan chương"
                 current_section = "Giới thiệu"
             
             elif p_lesson.match(line_stripped):
@@ -348,7 +333,6 @@ class RAGEngine:
                 buffer = []
                 current_section = clean_header(line_stripped)
                 
-            # Fallback cũ (giữ lại để an toàn)
             elif line_stripped.startswith("# "): 
                 commit_chunk(buffer, source_meta)
                 buffer = []
@@ -375,7 +359,7 @@ class RAGEngine:
         
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
         if not llama_api_key:
-            return "ERROR: Missing LLAMA_CLOUD_API_KEY in secrets"
+            return "ERROR: Missing LLAMA_CLOUD_API_KEY"
 
         try:
             parser = LlamaParse(
@@ -459,10 +443,22 @@ class RAGEngine:
             return ensemble_retriever
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+    
+    # [NEW] Hàm vệ sinh văn bản để xóa ký tự lạ
+    @staticmethod
+    def _sanitize_output(text: str) -> str:
+        """
+        Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật) và làm sạch format.
+        """
+        # Regex bắt tất cả các ký tự CJK phổ biến
+        cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
+        
+        # Nếu gặp từ tiếng Trung, thay thế bằng "từ khóa" (phù hợp ngữ cảnh) hoặc xóa bỏ
+        # Ở đây ta thay bằng "từ khóa" nếu nó là danh từ, hoặc xóa nếu rác
+        # Để an toàn nhất: Thay bằng text tiếng Việt generic hoặc xóa
+        text = cjk_pattern.sub("từ khóa", text) 
+        return text
 
-    # =========================================================================
-    # CORE FIX: LOGIC MAPPING MẠNH MẼ (QUÉT SẠCH CÁC BIẾN THỂ)
-    # =========================================================================
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
         if not retriever:
@@ -493,7 +489,6 @@ class RAGEngine:
             return
 
         # --- TẦNG 2: MAPPING REGISTRY (Sổ cái ánh xạ) ---
-        valid_uids = set()
         uid_to_citation_text = {}
         context_parts = []
 
@@ -506,21 +501,16 @@ class RAGEngine:
             chapter = doc.metadata.get('chapter', 'Chương ?')
             lesson = doc.metadata.get('lesson', 'Bài ?')
             
-            # --- CITATION LOGIC FIX (UPDATED FOR UX) ---
-            # Kiểm tra xem metadata có phải là giá trị mặc định hay không
+            # Logic hiển thị Citation
             is_default_chapter = (chapter == "Chương mở đầu")
             is_default_lesson = (lesson == "Bài mở đầu" or lesson == "Tổng quan chương")
             
             if is_default_chapter and is_default_lesson:
-                 # [MODIFIED] Nếu không xác định chương/bài -> Hiện Loại tài liệu + Trích đoạn
-                 # Thay vì hiển thị "Vị trí chưa xác định rõ"
                  doc_type = RAGEngine._detect_doc_type(src_clean)
-                 citation_display = f"📖 {src_clean} ➜ {doc_type} (Trích đoạn phù hợp)"
+                 citation_display = f"📖 {src_clean} ➜ {doc_type}" 
             else:
-                 # Hiển thị bình thường cho SGK có cấu trúc
                  citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
-            valid_uids.add(uid)
             uid_to_citation_text[uid] = citation_display
             
             context_parts.append(
@@ -529,15 +519,18 @@ class RAGEngine:
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT ---
-        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời dựa trên [CONTEXT].
+        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - NGHIÊM NGẶT) ---
+        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT].
 
-YÊU CẦU NGHIÊM NGẶT:
-1. KHÔNG trả lời dài dòng.
-2. Cuối mỗi ý, BẮT BUỘC chèn mã nguồn theo đúng định dạng: [ID:ref_code].
-3. KHÔNG ĐƯỢC THÊM bất kỳ từ nào như "Nguồn", "Refer", "Source" vào trong ngoặc vuông. 
-   ĐÚNG: [ID:a1b2c3d4]
-   SAI: [Nguồn ID: a1b2c3d4], [Refer ID: a1b2c3d4]
+CÁC QUY TẮC BẮT BUỘC (VI PHẠM LÀ LỖI HỆ THỐNG):
+1. NGÔN NGỮ: Chỉ dùng Tiếng Việt. Tuyệt đối KHÔNG xuất hiện ký tự Trung/Hàn/Nhật (như 关键词).
+2. TRÍCH DẪN (CITATION):
+   - SAI: x = 1 [ID:abcd], y = 2 [ID:xyzt]. (Tuyệt đối KHÔNG chèn citation vào giữa dòng code hoặc giữa các biến số).
+   - ĐÚNG: x = 1, y = 2. [ID:abcd] (Chỉ được chèn citation ở CUỐI CÂU hoặc CUỐI ĐOẠN văn bản).
+3. CODE PYTHON:
+   - KHÔNG bao giờ chèn [ID:...] vào bên trong khối lệnh (```python ... ```).
+   - Hãy để nguồn trích dẫn ở dòng văn bản giải thích phía trên hoặc phía dưới khối code.
+4. Trả lời ngắn gọn, đúng trọng tâm.
 
 [CONTEXT]
 {full_context}
@@ -560,19 +553,22 @@ YÊU CẦU NGHIÊM NGẶT:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: REGEX "LƯỚI QUÉT RỘNG" (Fix triệt để) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (QUAN TRỌNG) ---
             
-            # Regex này chấp nhận mọi biến thể mà LLM lỡ lời sinh ra:
+            # 1. Quét sạch ký tự lạ (Trung/Hàn)
+            cleaned_response = RAGEngine._sanitize_output(raw_response)
+            
+            # 2. Xử lý hiển thị Citation
             pattern_broad = r'\[.*[:\s]([a-zA-Z0-9]{8})\s*\]'
             
             def citation_mapper(match):
-                uid = match.group(1) # Lấy đúng cái mã 8 ký tự
+                uid = match.group(1) 
                 if uid in uid_to_citation_text:
-                    return f"\n<span class='citation-source'>{uid_to_citation_text[uid]}</span>"
-                return "" # Xóa nếu mã rác
+                    # Thêm khoảng trắng trước citation để không dính chữ
+                    return f" <span class='citation-source'>{uid_to_citation_text[uid]}</span>"
+                return "" 
 
-            # Thực hiện thay thế
-            final_response = re.sub(pattern_broad, citation_mapper, raw_response)
+            final_response = re.sub(pattern_broad, citation_mapper, cleaned_response)
             
             yield final_response
 
