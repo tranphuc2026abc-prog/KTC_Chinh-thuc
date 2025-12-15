@@ -160,7 +160,7 @@ class UIManager:
             st.markdown("""
             <div class="project-card">
                 <div class="project-title">KTC CHATBOT</div>
-                <div class="project-sub">Sản phẩm dự thi KHKT cấp trường</div>
+                <div class="project-sub">Sản phẩm dự thi KHKT cấp Tỉnh</div>
                 <hr style="margin: 10px 0; border-top: 1px dashed #dee2e6;">
                 <div style="font-size: 0.9rem; line-height: 1.6;">
                     <div style="display: flex; justify-content: space-between;">
