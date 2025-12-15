@@ -57,7 +57,7 @@ class AppConfig:
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
 
-    # RAG Parameters (Updated for Semantic Chunking)
+    # RAG Parameters
     RETRIEVAL_K = 30       
     FINAL_K = 5            
     
@@ -133,6 +133,18 @@ class UIManager:
                 background: white; border: 1px solid #e9ecef;
                 border-left: 5px solid #00b4d8;
             }
+            /* Style cho Citation để nổi bật nguồn */
+            .citation-source {
+                font-size: 0.85em;
+                color: #d63384; /* Màu hồng đậm */
+                background-color: #f8f9fa;
+                padding: 2px 6px;
+                border-radius: 4px;
+                border: 1px solid #e9ecef;
+                font-weight: 600;
+                margin-left: 5px;
+                display: inline-block;
+            }
             div.stButton > button {
                 border-radius: 8px; background-color: white; color: #0077b6;
                 border: 1px solid #90e0ef; transition: all 0.2s;
@@ -206,7 +218,7 @@ class UIManager:
         """, unsafe_allow_html=True)
 
 # ==================================
-# 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG (AUDIT GRADE)
+# 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
 # ==================================
 
 class RAGEngine:
@@ -255,9 +267,9 @@ class RAGEngine:
         lines = text.split('\n')
         chunks = []
         
-        current_chapter = "General"
-        current_lesson = "General"
-        current_section = "General"
+        current_chapter = "Chương mở đầu"
+        current_lesson = "Bài mở đầu"
+        current_section = "Nội dung"
         
         buffer = []
         
@@ -277,7 +289,6 @@ class RAGEngine:
                 "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
-            # Context explicitly embedded for retrieval match
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
@@ -289,13 +300,13 @@ class RAGEngine:
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = line.replace("# ", "").strip()
-                current_lesson = "Intro"
-                current_section = "Intro"
+                current_lesson = "Tổng quan"
+                current_section = "Tổng quan"
             elif line.startswith("## "): 
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_lesson = line.replace("## ", "").strip()
-                current_section = "Intro"
+                current_section = "Tổng quan"
             elif line.startswith("### "): 
                 commit_chunk(buffer, source_meta)
                 buffer = []
@@ -403,17 +414,16 @@ class RAGEngine:
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
+    # =========================================================================
+    # CORE FIX: LOGIC MAPPING CHUẨN XÁC
+    # =========================================================================
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
-        """
-        Quy trình Verifiable Hybrid RAG Chuẩn KHKT Quốc Gia
-        Mô hình: Evidence-Bound Generation (Ràng buộc minh chứng)
-        """
         if not retriever:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
             return
         
-        # --- TẦNG 1: RETRIEVAL & RERANK ---
+        # --- TẦNG 1: RETRIEVAL ---
         initial_docs = retriever.invoke(query)
         final_docs = []
         try:
@@ -436,7 +446,7 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: EVIDENCE REGISTRY (Tạo sổ cái minh chứng) ---
+        # --- TẦNG 2: MAPPING REGISTRY (Sổ cái ánh xạ) ---
         valid_uids = set()
         uid_to_citation_text = {}
         context_parts = []
@@ -445,37 +455,40 @@ class RAGEngine:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
+            # Xử lý tên nguồn cho đẹp
             src_raw = doc.metadata.get('source', '')
             src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
-            chapter = doc.metadata.get('chapter', 'Chương không xác định')
-            lesson = doc.metadata.get('lesson', 'Bài không xác định')
+            chapter = doc.metadata.get('chapter', 'Chương ?')
+            lesson = doc.metadata.get('lesson', 'Bài ?')
             
-            # Format hiển thị chuẩn KHKT: (Nguồn: Sách - Chương - Bài)
-            citation_display = f"(Nguồn: {src_clean} – {chapter} – {lesson})"
+            # Đây là chuỗi sẽ hiển thị cho người dùng
+            # <br> giúp xuống dòng đẹp trong Markdown
+            citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
             valid_uids.add(uid)
             uid_to_citation_text[uid] = citation_display
             
-            # Context chặt chẽ, buộc LLM nhìn thấy ID ngay cạnh nội dung
+            # Context chèn ID để LLM tham chiếu
             context_parts.append(
-                f"--- BEGIN CHUNK ---\nID: {uid}\n{doc.page_content}\n--- END CHUNK ---"
+                f"--- BEGIN DATA ---\nREF_CODE: {uid}\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: ATOMIC FACT PROMPTING (Ngăn chặn Source Collapse) ---
-        # Prompt này ép LLM xé nhỏ câu trả lời để mỗi ý phải gắn đúng 1 ID.
-        system_prompt = f"""Bạn là KTC Chatbot - Động cơ kiểm chứng tri thức giáo dục.
-Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT] dưới dạng CÁC MỆNH ĐỀ ĐƠN (Atomic Claims).
+        # --- TẦNG 3: PROMPT (Chống Hallucination & Định dạng cứng) ---
+        # Sử dụng [[CIT:xxxx]] thay vì [ID:xxxx] để tránh LLM dịch sang tiếng Việt
+        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT] dưới dạng CÁC MỆNH ĐỀ ĐƠN.
 
-QUY TẮC BẮT BUỘC (Strict Execution Rules):
-1. KHÔNG được trả lời kiểu văn xuôi liên tục. Hãy tách ý rõ ràng.
-2. MỖI mệnh đề/câu thông tin phải kết thúc ngay lập tức bằng ID nguồn.
-   Định dạng bắt buộc: Nội dung thông tin... [ID: <chunk_id>]
-3. TUYỆT ĐỐI KHÔNG gộp nhiều ý khác nguồn vào một câu. Tách chúng ra.
-4. KHÔNG tự bịa ID. Chỉ dùng ID có trong "BEGIN CHUNK" của [CONTEXT].
-5. KHÔNG tự viết tên sách/bài học vào câu trả lời. Hệ thống sẽ tự điền dựa trên ID.
-6. Nếu không có thông tin trong Context, ghi: "NO_INFO".
+LUẬT BẤT KHẢ KHÁNG (Bắt buộc tuân thủ):
+1. Mỗi câu trả lời phải dựa hoàn toàn vào [CONTEXT].
+2. KHÔNG trả lời kiểu văn xuôi dài dòng. Hãy tách ý.
+3. Cuối mỗi ý, BẮT BUỘC phải đính kèm thẻ nguồn theo đúng định dạng: [[CIT:mã_ref_code]].
+   Ví dụ: CPU là bộ xử lý trung tâm [[CIT:a1b2c3d4]]
+4. LƯU Ý QUAN TRỌNG: 
+   - Chỉ viết [[CIT:mã_code]]. 
+   - KHÔNG được viết thêm chữ "Nguồn", "ID", "Source" vào trong thẻ.
+   - KHÔNG tự bịa tên sách vào câu trả lời. Hệ thống sẽ tự động điền tên sách.
+5. Nếu không có thông tin, ghi: "NO_INFO".
 
 [CONTEXT]
 {full_context}
@@ -494,42 +507,26 @@ QUY TẮC BẮT BUỘC (Strict Execution Rules):
             )
             raw_response = completion.choices[0].message.content
 
-            # --- TẦNG 4: STRICT VALIDATION & MAPPING (Tránh Citation Drift) ---
-            
             if "NO_INFO" in raw_response or not raw_response.strip():
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # Regex tìm ID
-            pattern_id = r'\[ID:\s*([a-zA-Z0-9]{8})\]'
+            # --- TẦNG 4: THAY THẾ ID BẰNG TÊN SÁCH (Magic Replacement) ---
             
-            # Validation: Nếu câu trả lời có ID "ma" (không có trong context) -> Cảnh báo
-            found_ids = re.findall(pattern_id, raw_response)
-            valid_response = True
-            for fid in found_ids:
-                if fid not in valid_uids:
-                    # Phát hiện Hallucinated Citation -> Hủy phản hồi để đảm bảo tính khoa học
-                    valid_response = False
-                    break
+            # 1. Regex mới: Bắt chính xác [[CIT:xxxx]]
+            # 2 dấu ngoặc vuông giúp tránh nhầm lẫn với văn bản thường
+            pattern_id = r'\[\[CIT:\s*([a-zA-Z0-9]{8})\]\]'
             
-            if not valid_response:
-                yield "Hệ thống phát hiện lỗi trích dẫn không xác thực. Vui lòng thử lại."
-                return
-
-            # Mapping Presentation: Biến ID khô khan thành Nguồn đọc được
-            # Sử dụng hàm callback để thay thế từng ID tìm thấy
             def citation_mapper(match):
                 uid = match.group(1)
                 if uid in uid_to_citation_text:
-                    # In đậm nguồn để người dùng dễ tra cứu
-                    return f"\n> **{uid_to_citation_text[uid]}**" 
-                return "" # Xóa ID lỗi nếu lọt qua validation
+                    # Thay thế ID vô nghĩa bằng thông tin Sách - Chương - Bài
+                    # Sử dụng HTML/CSS class (nếu hỗ trợ) hoặc in đậm
+                    return f"\n<span class='citation-source'>{uid_to_citation_text[uid]}</span>"
+                return "" # Xóa tag nếu ID không hợp lệ
 
             # Thực hiện thay thế
             final_response = re.sub(pattern_id, citation_mapper, raw_response)
-            
-            # Làm sạch định dạng dư thừa (nếu có)
-            final_response = final_response.replace("--- BEGIN CHUNK ---", "").replace("--- END CHUNK ---", "")
             
             yield final_response
 
@@ -565,7 +562,7 @@ def main():
         bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
         avatar = "🧑‍🎓" if msg["role"] == "user" else bot_avatar
         with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"])
+            st.markdown(msg["content"], unsafe_allow_html=True) # Enable HTML for styling
 
     user_input = st.chat_input("Nhập câu hỏi học tập...")
     
@@ -586,9 +583,9 @@ def main():
             full_response = ""
             for chunk in response_gen:
                 full_response += chunk
-                response_placeholder.markdown(full_response + "▌")
+                response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
             
-            response_placeholder.markdown(full_response)
+            response_placeholder.markdown(full_response, unsafe_allow_html=True)
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
