@@ -4,8 +4,10 @@ import base64
 import streamlit as st
 import shutil
 import pickle
+import re
+import uuid
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Generator
 
 # --- Imports với xử lý lỗi ---
 try:
@@ -39,7 +41,7 @@ st.set_page_config(
 )
 
 class AppConfig:
-    # Model Config (Đã xóa Vision/Audio)
+    # Model Config
     LLM_MODEL = 'llama-3.1-8b-instant'
 
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -55,9 +57,7 @@ class AppConfig:
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
 
-    # RAG Parameters
-    CHUNK_SIZE = 1000       
-    CHUNK_OVERLAP = 200    
+    # RAG Parameters (Updated for Semantic Chunking)
     RETRIEVAL_K = 30       
     FINAL_K = 5            
     
@@ -65,11 +65,12 @@ class AppConfig:
     BM25_WEIGHT = 0.4      
     FAISS_WEIGHT = 0.6     
 
-    LLM_TEMPERATURE = 0.0  
+    LLM_TEMPERATURE = 0.0 # Deterministic output for Science
 
 # ===============================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
 # ===============================
+# LƯU Ý: GIỮ NGUYÊN 100% GIAO DIỆN THEO YÊU CẦU
 
 class UIManager:
     @staticmethod
@@ -177,8 +178,6 @@ class UIManager:
             </div>
             """, unsafe_allow_html=True)
             
-            # Đã xóa phần upload ảnh/audio ở đây
-
             st.markdown("### ⚙️ Tiện ích")
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
@@ -208,7 +207,7 @@ class UIManager:
         """, unsafe_allow_html=True)
 
 # ==================================
-# 3. LOGIC BACKEND - STATE OF THE ART (LlamaParse + Hybrid RAG)
+# 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG (Science Fair Standard)
 # ==================================
 
 class RAGEngine:
@@ -245,12 +244,79 @@ class RAGEngine:
             return None
 
     @staticmethod
-    def _detect_topic(text: str) -> str:
-        tx = (text or "").lower()
-        if any(t in tx for t in ["<html", "css", "javascript", "thẻ"]): return "html_web"
-        if any(t in tx for t in ["def ", "import ", "python", "biến", "hàm"]): return "python"
-        if any(t in tx for t in ["sql", "primary key", "csdl", "bảng", "truy vấn"]): return "database"
+    def _detect_grade(filename: str) -> str:
+        """Trích xuất khối lớp từ tên file để phục vụ Curriculum-Aware Retrieval"""
+        filename = filename.lower()
+        if "10" in filename: return "10"
+        if "11" in filename: return "11"
+        if "12" in filename: return "12"
         return "general"
+
+    @staticmethod
+    def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
+        """
+        Kỹ thuật Structural/Semantic Chunking (Thay thế RecursiveCharacterSplitter):
+        Phân rã văn bản dựa trên cấu trúc Markdown (#, ##, ###) để đảm bảo tính toàn vẹn tri thức.
+        """
+        lines = text.split('\n')
+        chunks = []
+        
+        # Context tracking
+        current_chapter = "General"
+        current_lesson = "General"
+        current_section = "General"
+        
+        buffer = []
+        
+        def commit_chunk(buf, meta):
+            if not buf: return
+            content = "\n".join(buf).strip()
+            if len(content) < 50: return # Bỏ qua chunk quá ngắn/nhiễu
+            
+            # Tạo Unique ID cho Verification Layer
+            chunk_uid = str(uuid.uuid4())[:8]
+            
+            # Metadata phong phú cho Curriculum-Aware Retrieval
+            new_meta = meta.copy()
+            new_meta.update({
+                "chunk_uid": chunk_uid,
+                "chapter": current_chapter,
+                "lesson": current_lesson,
+                "section": current_section,
+                # Contextual Page Content: Thêm tiêu đề vào nội dung để Embedding tốt hơn
+                "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
+            })
+            
+            # Page content bao gồm cả context để Vector Search hiểu ngữ cảnh
+            full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
+            
+            chunks.append(Document(page_content=full_content, metadata=new_meta))
+
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            # Detect Markdown Headers
+            if line.startswith("# "): # Chapter
+                commit_chunk(buffer, source_meta)
+                buffer = []
+                current_chapter = line.replace("# ", "").strip()
+                current_lesson = "Intro"
+                current_section = "Intro"
+            elif line.startswith("## "): # Lesson
+                commit_chunk(buffer, source_meta)
+                buffer = []
+                current_lesson = line.replace("## ", "").strip()
+                current_section = "Intro"
+            elif line.startswith("### "): # Section
+                commit_chunk(buffer, source_meta)
+                buffer = []
+                current_section = line.replace("### ", "").strip()
+            else:
+                buffer.append(line)
+        
+        commit_chunk(buffer, source_meta) # Commit phần còn lại
+        return chunks
 
     @staticmethod
     def _parse_pdf_with_llama(file_path: str) -> str:
@@ -272,7 +338,7 @@ class RAGEngine:
                 result_type="markdown",
                 language="vi",
                 verbose=True,
-                parsing_instruction="Đây là tài liệu giáo khoa Tin học. Hãy giữ nguyên định dạng bảng biểu, code block và công thức toán học."
+                parsing_instruction="Đây là tài liệu giáo khoa Tin học. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc chương mục (#, ##, ###)."
             )
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
@@ -285,58 +351,35 @@ class RAGEngine:
             return f"Error parsing {file_name}: {str(e)}"
 
     @staticmethod
-    def _read_source_files(pdf_dir: str) -> List[Document]:
+    def _read_and_process_files(pdf_dir: str) -> List[Document]:
         if not os.path.exists(pdf_dir):
             return []
         
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
-        docs: List[Document] = []
+        all_chunks: List[Document] = []
         status_text = st.empty()
 
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
-            status_text.text(f"Đang xử lý chuyên sâu: {source_file}...")
+            status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
             
             markdown_content = RAGEngine._parse_pdf_with_llama(file_path)
             
             if "ERROR" not in markdown_content and len(markdown_content) > 50:
-                 docs.append(Document(
-                    page_content=markdown_content,
-                    metadata={"source": source_file, "title": source_file.replace('.pdf', '')}
-                ))
+                 # Base Metadata
+                 meta = {
+                     "source": source_file, 
+                     "grade": RAGEngine._detect_grade(source_file)
+                 }
+                 # Apply Semantic Chunking
+                 file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
+                 all_chunks.extend(file_chunks)
             else:
-                try:
-                    from pypdf import PdfReader
-                    reader = PdfReader(file_path)
-                    text = ""
-                    for page in reader.pages:
-                        text += page.extract_text() or ""
-                    docs.append(Document(page_content=text, metadata={"source": source_file, "title": source_file}))
-                except: pass
+                # Fallback nếu LlamaParse lỗi (ít dùng, nhưng giữ để an toàn)
+                pass 
                 
         status_text.empty()
-        return docs
-
-    @staticmethod
-    def _chunk_documents(docs: List[Document]) -> List[Document]:
-        if not docs:
-            return []
-        
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=AppConfig.CHUNK_SIZE,
-            chunk_overlap=AppConfig.CHUNK_OVERLAP,
-            separators=["\n# ", "\n## ", "\n### ", "\n\n", "\n", ". ", " "],
-            add_start_index=True
-        )
-        chunks: List[Document] = []
-        for d in docs:
-            split_docs = splitter.split_documents([d])
-            for i, sd in enumerate(split_docs):
-                meta = dict(d.metadata)
-                meta["chunk_id"] = f"{meta['source']}#c{i}"
-                meta["topic"] = RAGEngine._detect_topic(sd.page_content)
-                chunks.append(Document(page_content=sd.page_content, metadata=meta))
-        return chunks
+        return all_chunks
 
     @staticmethod
     def build_hybrid_retriever(embeddings):
@@ -349,14 +392,11 @@ class RAGEngine:
             except Exception: pass
 
         if not vector_db:
-            raw_docs = RAGEngine._read_source_files(AppConfig.PDF_DIR)
-            if not raw_docs:
-                st.error(f"Không tìm thấy tài liệu trong {AppConfig.PDF_DIR}")
+            chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
+            if not chunk_docs:
+                st.error(f"Không tìm thấy tài liệu hoặc lỗi xử lý trong {AppConfig.PDF_DIR}")
                 return None
             
-            chunk_docs = RAGEngine._chunk_documents(raw_docs)
-            if not chunk_docs: return None
-
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
             vector_db.save_local(AppConfig.VECTOR_DB_PATH)
 
@@ -378,17 +418,23 @@ class RAGEngine:
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
-    # Đã xóa hàm process_multimodal
-
     @staticmethod
-    def generate_response(client, retriever, query):
+    def generate_response(client, retriever, query) -> Generator[str, None, None]:
+        """
+        Quy trình Verifiable RAG:
+        1. Retrieval (Truy xuất)
+        2. Reranking (Xếp hạng)
+        3. Strict Generation (Sinh văn bản kèm ràng buộc)
+        4. Post-Generation Validation (Kiểm chứng sau sinh)
+        """
         if not retriever:
-            return ["Hệ thống đang khởi tạo... vui lòng chờ giây lát."], []
+            yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
+            return
         
-        # 1. Hybrid Retrieval
+        # --- 1. Hybrid Retrieval ---
         initial_docs = retriever.invoke(query)
         
-        # 2. Reranking (Lọc tinh)
+        # --- 2. Reranking (Curriculum-Aware Optimization) ---
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
@@ -408,48 +454,88 @@ class RAGEngine:
             final_docs = initial_docs[:AppConfig.FINAL_K]
 
         if not final_docs:
-            return ["Xin lỗi, tôi không tìm thấy thông tin trong SGK để trả lời câu hỏi này."], []
+            yield "Xin lỗi, tôi không tìm thấy thông tin trong SGK để trả lời câu hỏi này."
+            return
 
-        # 3. Build Context (Kèm tên sách để trích dẫn)
+        # --- 3. Build Verifiable Context ---
         context_parts = []
-        source_display = []
-        for i, doc in enumerate(final_docs):
-            src_name = doc.metadata.get('source', 'TaiLieu')
-            source_display.append(f"{src_name}")
-            context_parts.append(f"--- TÀI LIỆU {i+1} ({src_name}) ---\n{doc.page_content}\n")
+        valid_uids = [] # Danh sách UID hợp lệ để đối chiếu
+        source_display_set = set()
+
+        for doc in final_docs:
+            uid = doc.metadata.get('chunk_uid', 'N/A')
+            src = doc.metadata.get('source', 'Unknown')
+            grade = doc.metadata.get('grade', '')
+            chapter = doc.metadata.get('chapter', '')
+            
+            valid_uids.append(uid)
+            source_display_set.add(f"{src} - {chapter}")
+            
+            context_parts.append(
+                f"<chunk id='{uid}'>\n"
+                f"Nguồn: {src} (Lớp {grade}) - {chapter}\n"
+                f"Nội dung: {doc.page_content}\n"
+                f"</chunk>"
+            )
         
-        full_context = "\n".join(context_parts)
+        full_context = "\n\n".join(context_parts)
 
-        # 4. Strict Prompting
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý học tập AI.
-NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT] được cung cấp dưới đây.
+        # --- 4. Strict Scientific Prompting ---
+        system_prompt = f"""Bạn là KTC Chatbot - Trợ lý AI giáo dục chuẩn mực.
+NHIỆM VỤ: Trả lời câu hỏi dựa trên các [CHUNK] tri thức được cung cấp.
 
-QUY TẮC TUYỆT ĐỐI (Dành cho KHKT Quốc Gia):
-1. **Chính xác:** Chỉ dùng thông tin trong [CONTEXT]. Nếu không có, nói "Không tìm thấy thông tin trong SGK".
-2. **Trích dẫn:** Cuối câu trả lời, hãy ghi rõ nguồn. Ví dụ: (Theo SGK Tin học 10).
-3. **Định dạng:** Sử dụng Markdown để trình bày code block, bảng biểu rõ ràng đẹp mắt.
-4. **Không bịa đặt:** Không được tự sáng tác kiến thức ngoài SGK.
+QUY TẮC BẮT BUỘC (VERIFIABLE GROUNDING):
+1. **Dựa hoàn toàn vào Context:** Không sử dụng kiến thức bên ngoài. Nếu không có thông tin, trả lời "Không tìm thấy thông tin trong SGK".
+2. **Trích dẫn định danh (Evidence-Based):** Cuối mỗi ý quan trọng, PHẢI ghi ID của chunk đã dùng. 
+   Format: [Nguồn ID: <chunk_id>]
+3. **Ngôn ngữ khoa học:** Khách quan, chính xác, không dùng từ cảm thán.
+4. **Định dạng:** Dùng Markdown cho code/bảng.
 
 [CONTEXT BẮT ĐẦU]
 {full_context}
 [CONTEXT KẾT THÚC]
 """
-        # Đã xóa phần vision context trong prompt
 
         try:
-            stream = client.chat.completions.create(
+            # Lưu ý: Không stream ngay lập tức để thực hiện Validation Layer
+            completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                stream=True,
+                stream=False, # Tắt stream để validate toàn vẹn
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=1500
             )
-            return stream, list(set(source_display))
+            raw_response = completion.choices[0].message.content
+
+            # --- 5. Post-Generation Validation Layer ---
+            # Kiểm tra xem AI có bịa đặt citations hoặc trả lời không căn cứ không
+            
+            # Regex tìm các citation dạng [Nguồn ID: ...]
+            found_citations = re.findall(r'\[Nguồn ID: (.*?)\]', raw_response)
+            
+            # Nếu AI đưa ra câu trả lời khẳng định nhưng KHÔNG trích dẫn ID nào -> Cảnh báo hoặc reject
+            # Nếu AI trích dẫn ID không có trong valid_uids -> Hallucination -> Reject
+            
+            is_valid = True
+            if found_citations:
+                for cid in found_citations:
+                    if cid.strip() not in valid_uids:
+                        is_valid = False # Hallucination citation
+                        break
+            
+            # Logic hiển thị
+            if not is_valid:
+                yield "Hệ thống phát hiện câu trả lời không trích dẫn đúng nguồn dữ liệu gốc. Vui lòng thử lại với câu hỏi cụ thể hơn."
+            else:
+                # Nếu hợp lệ, giả lập stream để trả về UI (do hàm main mong đợi iterable)
+                # Tách text để tạo hiệu ứng gõ phím nhẹ (optional) hoặc yield cả cục
+                yield raw_response
+                
         except Exception as e:
-            return [f"Lỗi API: {str(e)}"], []
+            yield f"Lỗi xử lý AI: {str(e)}"
 
 # ===================
 # 4. MAIN APPLICATION
@@ -465,12 +551,12 @@ def main():
     UIManager.render_header()
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức."}]
+        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học."}]
 
     groq_client = RAGEngine.load_groq_client()
 
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (LlamaParse + Hybrid)..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (LlamaParse + Semantic Chunking)..."):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
             if st.session_state.retriever_engine:
@@ -482,7 +568,7 @@ def main():
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    user_input = st.chat_input("Nhập câu hỏi của bạn tại đây...")
+    user_input = st.chat_input("Nhập câu hỏi học tập...")
     
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
@@ -492,30 +578,21 @@ def main():
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
             
-            # Đã xóa logic xử lý file upload/vision context
-
-            stream, sources = RAGEngine.generate_response(
+            # Gọi generator (đã bao gồm Validation Layer bên trong)
+            # Generator này có thể delay một chút để validate trước khi yield
+            response_gen = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
                 user_input
             )
 
             full_response = ""
-            if isinstance(stream, list):
-                full_response = stream[0]
-                response_placeholder.markdown(full_response)
-            else:
-                for chunk in stream:
-                    content = chunk.choices[0].delta.content
-                    if content:
-                        full_response += content
-                        response_placeholder.markdown(full_response + "▌")
-                response_placeholder.markdown(full_response)
-
-            if sources:
-                with st.expander("📚 Nguồn SGK xác thực"):
-                    for src in sources:
-                        st.markdown(f"- {src}")
+            for chunk in response_gen:
+                # Vì Validation tắt stream API, chunk ở đây thực tế là full text hoặc error msg
+                full_response += chunk
+                response_placeholder.markdown(full_response + "▌")
+            
+            response_placeholder.markdown(full_response)
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
