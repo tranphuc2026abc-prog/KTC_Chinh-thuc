@@ -117,25 +117,57 @@ class UIManager:
 class RAGEngine:
 
     @staticmethod
-    def parse_pdf(pdf_path: str) -> str:
-        os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-        md_path = os.path.join(AppConfig.PROCESSED_MD_DIR, os.path.basename(pdf_path) + ".md")
+def parse_pdf(pdf_path: str) -> str:
+    os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
+    md_path = os.path.join(
+        AppConfig.PROCESSED_MD_DIR,
+        os.path.basename(pdf_path) + ".md"
+    )
 
-        if os.path.exists(md_path):
-            return open(md_path, encoding="utf-8").read()
+    # Nếu đã parse rồi thì dùng lại
+    if os.path.exists(md_path):
+        with open(md_path, encoding="utf-8") as f:
+            return f.read()
 
-        parser = LlamaParse(
-            api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
-            result_type="markdown",
-            language="vi"
-        )
-        docs = parser.load_data(pdf_path)
-        text = docs[0].text
+    parser = LlamaParse(
+        api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
+        result_type="markdown",
+        language="vi"
+    )
 
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(text)
+    docs = parser.load_data(pdf_path)
 
-        return text
+    # ===============================
+    # NATIONAL SAFE GUARD – BẮT BUỘC
+    # ===============================
+    if not docs or not hasattr(docs[0], "text") or not docs[0].text.strip():
+        # KHÔNG được tạo tri thức giả
+        # Trả về chuỗi rỗng để tầng chunking tự loại bỏ
+        return ""
+
+    text = docs[0].text
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    return text
+
+
+    # ===============================
+    # NATIONAL SAFE GUARD – BẮT BUỘC
+    # ===============================
+    if not docs or not hasattr(docs[0], "text") or not docs[0].text.strip():
+        # KHÔNG được tạo tri thức giả
+        # Trả về chuỗi rỗng để tầng chunking tự loại bỏ
+        return ""
+
+    text = docs[0].text
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    return text
+
 
     # --------------------------------------------------------
     # STRUCTURAL / SEMANTIC CHUNKING (MANDATORY)
