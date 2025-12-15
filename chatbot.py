@@ -415,7 +415,7 @@ class RAGEngine:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
     # =========================================================================
-    # CORE FIX: LOGIC MAPPING CHUẨN XÁC
+    # CORE FIX: LOGIC MAPPING MẠNH MẼ (QUÉT SẠCH CÁC BIẾN THỂ)
     # =========================================================================
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
@@ -455,40 +455,31 @@ class RAGEngine:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
-            # Xử lý tên nguồn cho đẹp
             src_raw = doc.metadata.get('source', '')
             src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
             chapter = doc.metadata.get('chapter', 'Chương ?')
             lesson = doc.metadata.get('lesson', 'Bài ?')
             
-            # Đây là chuỗi sẽ hiển thị cho người dùng
-            # <br> giúp xuống dòng đẹp trong Markdown
             citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
             valid_uids.add(uid)
             uid_to_citation_text[uid] = citation_display
             
-            # Context chèn ID để LLM tham chiếu
             context_parts.append(
                 f"--- BEGIN DATA ---\nREF_CODE: {uid}\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (Chống Hallucination & Định dạng cứng) ---
-        # Sử dụng [[CIT:xxxx]] thay vì [ID:xxxx] để tránh LLM dịch sang tiếng Việt
-        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT] dưới dạng CÁC MỆNH ĐỀ ĐƠN.
+        # --- TẦNG 3: PROMPT ---
+        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời dựa trên [CONTEXT].
 
-LUẬT BẤT KHẢ KHÁNG (Bắt buộc tuân thủ):
-1. Mỗi câu trả lời phải dựa hoàn toàn vào [CONTEXT].
-2. KHÔNG trả lời kiểu văn xuôi dài dòng. Hãy tách ý.
-3. Cuối mỗi ý, BẮT BUỘC phải đính kèm thẻ nguồn theo đúng định dạng: [[CIT:mã_ref_code]].
-   Ví dụ: CPU là bộ xử lý trung tâm [[CIT:a1b2c3d4]]
-4. LƯU Ý QUAN TRỌNG: 
-   - Chỉ viết [[CIT:mã_code]]. 
-   - KHÔNG được viết thêm chữ "Nguồn", "ID", "Source" vào trong thẻ.
-   - KHÔNG tự bịa tên sách vào câu trả lời. Hệ thống sẽ tự động điền tên sách.
-5. Nếu không có thông tin, ghi: "NO_INFO".
+YÊU CẦU NGHIÊM NGẶT:
+1. KHÔNG trả lời dài dòng.
+2. Cuối mỗi ý, BẮT BUỘC chèn mã nguồn theo đúng định dạng: [ID:ref_code].
+3. KHÔNG ĐƯỢC THÊM bất kỳ từ nào như "Nguồn", "Refer", "Source" vào trong ngoặc vuông. 
+   ĐÚNG: [ID:a1b2c3d4]
+   SAI: [Nguồn ID: a1b2c3d4], [Refer ID: a1b2c3d4]
 
 [CONTEXT]
 {full_context}
@@ -511,22 +502,21 @@ LUẬT BẤT KHẢ KHÁNG (Bắt buộc tuân thủ):
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: THAY THẾ ID BẰNG TÊN SÁCH (Magic Replacement) ---
+            # --- TẦNG 4: REGEX "LƯỚI QUÉT RỘNG" (Fix triệt để) ---
             
-            # 1. Regex mới: Bắt chính xác [[CIT:xxxx]]
-            # 2 dấu ngoặc vuông giúp tránh nhầm lẫn với văn bản thường
-            pattern_id = r'\[\[CIT:\s*([a-zA-Z0-9]{8})\]\]'
+            # Regex này chấp nhận mọi biến thể mà LLM lỡ lời sinh ra:
+            # Nó bắt: [ + (bất kỳ chữ gì như Nguồn, Refer, ID) + dấu hai chấm + MÃ 8 KÝ TỰ + ]
+            # Ví dụ bắt được hết: [ID: 12345678], [Nguồn ID: 12345678], [Refer: 12345678]
+            pattern_broad = r'\[.*[:\s]([a-zA-Z0-9]{8})\s*\]'
             
             def citation_mapper(match):
-                uid = match.group(1)
+                uid = match.group(1) # Lấy đúng cái mã 8 ký tự
                 if uid in uid_to_citation_text:
-                    # Thay thế ID vô nghĩa bằng thông tin Sách - Chương - Bài
-                    # Sử dụng HTML/CSS class (nếu hỗ trợ) hoặc in đậm
                     return f"\n<span class='citation-source'>{uid_to_citation_text[uid]}</span>"
-                return "" # Xóa tag nếu ID không hợp lệ
+                return "" # Xóa nếu mã rác
 
             # Thực hiện thay thế
-            final_response = re.sub(pattern_id, citation_mapper, raw_response)
+            final_response = re.sub(pattern_broad, citation_mapper, raw_response)
             
             yield final_response
 
@@ -562,7 +552,7 @@ def main():
         bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
         avatar = "🧑‍🎓" if msg["role"] == "user" else bot_avatar
         with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"], unsafe_allow_html=True) # Enable HTML for styling
+            st.markdown(msg["content"], unsafe_allow_html=True) 
 
     user_input = st.chat_input("Nhập câu hỏi học tập...")
     
