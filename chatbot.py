@@ -254,6 +254,18 @@ class RAGEngine:
         except Exception as e:
             return None
 
+    # [NEW] Hàm phân loại tài liệu dựa trên tên file để hiển thị citation đẹp hơn
+    @staticmethod
+    def _detect_doc_type(source_name: str) -> str:
+        name_lower = source_name.lower()
+        if any(k in name_lower for k in ["on thi", "ôn thi"]):
+            return "Tài liệu ôn tập"
+        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
+            return "Tài liệu tham khảo"
+        if any(k in name_lower for k in ["sgk", "tin"]):
+            return "Tài liệu học tập"
+        return "Tài liệu tham khảo"
+
     @staticmethod
     def _detect_grade(filename: str) -> str:
         filename = filename.lower()
@@ -494,16 +506,18 @@ class RAGEngine:
             chapter = doc.metadata.get('chapter', 'Chương ?')
             lesson = doc.metadata.get('lesson', 'Bài ?')
             
-            # --- CITATION LOGIC FIX (THẦY KHANH REQUEST) ---
+            # --- CITATION LOGIC FIX (UPDATED FOR UX) ---
             # Kiểm tra xem metadata có phải là giá trị mặc định hay không
             is_default_chapter = (chapter == "Chương mở đầu")
             is_default_lesson = (lesson == "Bài mở đầu" or lesson == "Tổng quan chương")
             
             if is_default_chapter and is_default_lesson:
-                 # Nếu cả 2 đều chưa xác định -> Fallback an toàn
-                 citation_display = f"📖 {src_clean} ➜ (Vị trí chưa xác định rõ)"
+                 # [MODIFIED] Nếu không xác định chương/bài -> Hiện Loại tài liệu + Trích đoạn
+                 # Thay vì hiển thị "Vị trí chưa xác định rõ"
+                 doc_type = RAGEngine._detect_doc_type(src_clean)
+                 citation_display = f"📖 {src_clean} ➜ {doc_type} (Trích đoạn phù hợp)"
             else:
-                 # Hiển thị bình thường
+                 # Hiển thị bình thường cho SGK có cấu trúc
                  citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
             valid_uids.add(uid)
