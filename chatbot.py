@@ -39,10 +39,8 @@ st.set_page_config(
 )
 
 class AppConfig:
-    # Model Config
+    # Model Config (Đã xóa Vision/Audio)
     LLM_MODEL = 'llama-3.1-8b-instant'
-    LLM_VISION_MODEL = 'llama-3.2-11b-vision-preview'
-    LLM_AUDIO_MODEL = 'whisper-large-v3'
 
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     RERANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
@@ -51,14 +49,14 @@ class AppConfig:
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
     RERANK_CACHE = "./opt"
-    PROCESSED_MD_DIR = "PROCESSED_MD" # Thư mục lưu cache Markdown
+    PROCESSED_MD_DIR = "PROCESSED_MD" 
 
     # Assets
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
 
-    # RAG Parameters (Tối ưu cho Markdown SGK)
-    CHUNK_SIZE = 1000       # Tăng lên vì Markdown chứa nhiều ký tự định dạng
+    # RAG Parameters
+    CHUNK_SIZE = 1000       
     CHUNK_OVERLAP = 200    
     RETRIEVAL_K = 30       
     FINAL_K = 5            
@@ -67,10 +65,10 @@ class AppConfig:
     BM25_WEIGHT = 0.4      
     FAISS_WEIGHT = 0.6     
 
-    LLM_TEMPERATURE = 0.0  # Zero temperature cho độ chính xác tuyệt đối
+    LLM_TEMPERATURE = 0.0  
 
 # ===============================
-# 2. XỬ LÝ GIAO DIỆN (UI MANAGER - GIỮ NGUYÊN 100%) 
+# 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
 # ===============================
 
 class UIManager:
@@ -178,18 +176,12 @@ class UIManager:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-
-            with st.expander("📂 Tính năng nâng cao (AI Vision)", expanded=False):
-                st.markdown("<small>Tải ảnh lỗi code hoặc file ghi âm câu hỏi</small>", unsafe_allow_html=True)
-                uploaded_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'mp3', 'wav', 'py'], key="multimodal_upload")
-                if uploaded_file:
-                    st.session_state.uploaded_file_obj = uploaded_file
-                    st.success("Đã nhận file!")
+            
+            # Đã xóa phần upload ảnh/audio ở đây
 
             st.markdown("### ⚙️ Tiện ích")
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
-                st.session_state.uploaded_file_obj = None
                 st.rerun()
 
             if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
@@ -260,25 +252,16 @@ class RAGEngine:
         if any(t in tx for t in ["sql", "primary key", "csdl", "bảng", "truy vấn"]): return "database"
         return "general"
 
-    # --- NEW: HÀM XỬ LÝ LlamaParse (Thay thế PyPDF) ---
     @staticmethod
     def _parse_pdf_with_llama(file_path: str) -> str:
-        """
-        Gửi PDF lên LlamaCloud để parse thành Markdown chuẩn.
-        Có cơ chế Cache: Nếu file đã parse rồi thì đọc file .md lưu sẵn.
-        """
-        # Tạo thư mục cache nếu chưa có
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-        
         file_name = os.path.basename(file_path)
         md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
         
-        # 1. Kiểm tra Cache
         if os.path.exists(md_file_path):
             with open(md_file_path, "r", encoding="utf-8") as f:
                 return f.read()
         
-        # 2. Nếu chưa có, gọi API LlamaParse
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
         if not llama_api_key:
             return "ERROR: Missing LLAMA_CLOUD_API_KEY in secrets"
@@ -294,7 +277,6 @@ class RAGEngine:
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
             
-            # 3. Lưu vào Cache
             with open(md_file_path, "w", encoding="utf-8") as f:
                 f.write(markdown_text)
             
@@ -309,14 +291,12 @@ class RAGEngine:
         
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
         docs: List[Document] = []
-        
-        status_text = st.empty() # UI feedback
+        status_text = st.empty()
 
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
             status_text.text(f"Đang xử lý chuyên sâu: {source_file}...")
             
-            # Dùng LlamaParse thay vì PyPDF
             markdown_content = RAGEngine._parse_pdf_with_llama(file_path)
             
             if "ERROR" not in markdown_content and len(markdown_content) > 50:
@@ -325,7 +305,6 @@ class RAGEngine:
                     metadata={"source": source_file, "title": source_file.replace('.pdf', '')}
                 ))
             else:
-                # Fallback nếu lỗi hoặc không có key (để hệ thống không chết)
                 try:
                     from pypdf import PdfReader
                     reader = PdfReader(file_path)
@@ -343,14 +322,10 @@ class RAGEngine:
         if not docs:
             return []
         
-        # Với Markdown từ LlamaParse, ta dùng separator thông minh hơn
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=AppConfig.CHUNK_SIZE,
             chunk_overlap=AppConfig.CHUNK_OVERLAP,
-            separators=[
-                "\n# ", "\n## ", "\n### ", # Ưu tiên cắt theo chương mục
-                "\n\n", "\n", ". ", " "
-            ],
+            separators=["\n# ", "\n## ", "\n### ", "\n\n", "\n", ". ", " "],
             add_start_index=True
         )
         chunks: List[Document] = []
@@ -368,13 +343,11 @@ class RAGEngine:
         if not embeddings: return None
 
         vector_db = None
-        # Kiểm tra xem DB cũ có tồn tại không
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
             except Exception: pass
 
-        # Nếu chưa có DB, build mới từ đầu (quy trình này giờ bao gồm LlamaParse)
         if not vector_db:
             raw_docs = RAGEngine._read_source_files(AppConfig.PDF_DIR)
             if not raw_docs:
@@ -387,14 +360,11 @@ class RAGEngine:
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
             vector_db.save_local(AppConfig.VECTOR_DB_PATH)
 
-        # Build Ensemble Retriever
         try:
             docstore_docs = list(vector_db.docstore._dict.values())
-            # BM25 cho từ khóa chính xác
             bm25_retriever = BM25Retriever.from_documents(docstore_docs)
             bm25_retriever.k = AppConfig.RETRIEVAL_K
 
-            # Vector cho ngữ nghĩa
             faiss_retriever = vector_db.as_retriever(
                 search_type="mmr",
                 search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5}
@@ -408,41 +378,10 @@ class RAGEngine:
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
 
-    @staticmethod
-    def process_multimodal(client, uploaded_file):
-        vision_desc = ""
-        audio_text = ""
-        if uploaded_file.type.startswith('image'):
-            base64_image = base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
-            try:
-                resp = client.chat.completions.create(
-                    model=AppConfig.LLM_VISION_MODEL,
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Hãy trích xuất nội dung code hoặc văn bản trong ảnh này chi tiết."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                        ]
-                    }]
-                )
-                vision_desc = resp.choices[0].message.content or ""
-            except Exception: pass
-        elif uploaded_file.type.startswith('audio'):
-            try:
-                tmp_path = "temp_audio_input.mp3"
-                with open(tmp_path, "wb") as f: f.write(uploaded_file.getbuffer())
-                with open(tmp_path, "rb") as f:
-                    transcription = client.audio.transcriptions.create(
-                        file=(tmp_path, f.read()),
-                        model=AppConfig.LLM_AUDIO_MODEL
-                    )
-                audio_text = transcription.text or ""
-                os.remove(tmp_path)
-            except Exception: pass
-        return vision_desc, audio_text
+    # Đã xóa hàm process_multimodal
 
     @staticmethod
-    def generate_response(client, retriever, query, vision_context=None):
+    def generate_response(client, retriever, query):
         if not retriever:
             return ["Hệ thống đang khởi tạo... vui lòng chờ giây lát."], []
         
@@ -476,10 +415,7 @@ class RAGEngine:
         source_display = []
         for i, doc in enumerate(final_docs):
             src_name = doc.metadata.get('source', 'TaiLieu')
-            # Lấy snippet ngắn gọn cho UI
             source_display.append(f"{src_name}")
-            
-            # Context đầy đủ cho AI (Markdown được giữ nguyên)
             context_parts.append(f"--- TÀI LIỆU {i+1} ({src_name}) ---\n{doc.page_content}\n")
         
         full_context = "\n".join(context_parts)
@@ -496,9 +432,9 @@ QUY TẮC TUYỆT ĐỐI (Dành cho KHKT Quốc Gia):
 
 [CONTEXT BẮT ĐẦU]
 {full_context}
-{f"Thông tin bổ sung từ ảnh/audio: {vision_context}" if vision_context else ""}
 [CONTEXT KẾT THÚC]
 """
+        # Đã xóa phần vision context trong prompt
 
         try:
             stream = client.chat.completions.create(
@@ -529,11 +465,10 @@ def main():
     UIManager.render_header()
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot (bản nâng cấp KHKT) sẵn sàng hỗ trợ."}]
+        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức."}]
 
     groq_client = RAGEngine.load_groq_client()
 
-    # Khởi tạo DB (Chạy ngầm LlamaParse khi bấm nút Update)
     if "retriever_engine" not in st.session_state:
         with st.spinner("🚀 Đang khởi động hệ thống tri thức số (LlamaParse + Hybrid)..."):
             embeddings = RAGEngine.load_embedding_model()
@@ -547,13 +482,8 @@ def main():
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # Input handling
     user_input = st.chat_input("Nhập câu hỏi của bạn tại đây...")
     
-    if "temp_input" in st.session_state:
-        user_input = st.session_state.temp_input
-        del st.session_state.temp_input
-
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user", avatar="🧑‍🎓"):
@@ -562,18 +492,12 @@ def main():
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
             
-            vision_context = None
-            if "uploaded_file_obj" in st.session_state and st.session_state.uploaded_file_obj:
-                with st.status("🖼️ Đang phân tích file...", expanded=False):
-                    desc, audio = RAGEngine.process_multimodal(groq_client, st.session_state.uploaded_file_obj)
-                    vision_context = desc
-                    if audio: user_input += f" {audio}"
+            # Đã xóa logic xử lý file upload/vision context
 
             stream, sources = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
-                user_input,
-                vision_context
+                user_input
             )
 
             full_response = ""
@@ -594,7 +518,6 @@ def main():
                         st.markdown(f"- {src}")
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
-            if "uploaded_file_obj" in st.session_state: st.session_state.uploaded_file_obj = None
 
 if __name__ == "__main__":
     main()
