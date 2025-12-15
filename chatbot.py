@@ -70,7 +70,6 @@ class AppConfig:
 # ===============================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
 # ===============================
-# LƯU Ý: GIỮ NGUYÊN 100% GIAO DIỆN THEO YÊU CẦU
 
 class UIManager:
     @staticmethod
@@ -421,11 +420,8 @@ class RAGEngine:
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
         """
-        Quy trình Verifiable RAG:
-        1. Retrieval (Truy xuất)
-        2. Reranking (Xếp hạng)
-        3. Strict Generation (Sinh văn bản kèm ràng buộc)
-        4. Post-Generation Validation (Kiểm chứng sau sinh)
+        Quy trình Verifiable RAG (Đã nâng cấp hiển thị thân thiện):
+        1. Retrieval -> 2. Rerank -> 3. Generation (dùng ID) -> 4. Validation -> 5. Mapping (ID sang Tên bài)
         """
         if not retriever:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
@@ -434,7 +430,7 @@ class RAGEngine:
         # --- 1. Hybrid Retrieval ---
         initial_docs = retriever.invoke(query)
         
-        # --- 2. Reranking (Curriculum-Aware Optimization) ---
+        # --- 2. Reranking ---
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
@@ -457,23 +453,33 @@ class RAGEngine:
             yield "Xin lỗi, tôi không tìm thấy thông tin trong SGK để trả lời câu hỏi này."
             return
 
-        # --- 3. Build Verifiable Context ---
+        # --- 3. Build Verifiable Context & Map ID ---
         context_parts = []
-        valid_uids = [] # Danh sách UID hợp lệ để đối chiếu
-        source_display_set = set()
+        valid_uids = [] 
+        
+        # Tạo từ điển ánh xạ: ID -> Tên nguồn dễ đọc
+        id_to_readable = {} 
 
         for doc in final_docs:
             uid = doc.metadata.get('chunk_uid', 'N/A')
-            src = doc.metadata.get('source', 'Unknown')
-            grade = doc.metadata.get('grade', '')
+            src = doc.metadata.get('source', 'Tài liệu')
+            # Làm sạch tên file .pdf nếu cần
+            src_clean = src.replace('.pdf', '').replace('_', ' ')
             chapter = doc.metadata.get('chapter', '')
+            lesson = doc.metadata.get('lesson', '')
             
             valid_uids.append(uid)
-            source_display_set.add(f"{src} - {chapter}")
+            
+            # Lưu thông tin để tí nữa thay thế
+            # Format hiển thị: [Tên sách - Tên bài]
+            readable_source = f"{src_clean}"
+            if chapter and chapter != "General": readable_source += f" - {chapter}"
+            if lesson and lesson != "Intro": readable_source += f" - {lesson}"
+            
+            id_to_readable[uid] = readable_source
             
             context_parts.append(
                 f"<chunk id='{uid}'>\n"
-                f"Nguồn: {src} (Lớp {grade}) - {chapter}\n"
                 f"Nội dung: {doc.page_content}\n"
                 f"</chunk>"
             )
@@ -481,58 +487,58 @@ class RAGEngine:
         full_context = "\n\n".join(context_parts)
 
         # --- 4. Strict Scientific Prompting ---
-        system_prompt = f"""Bạn là KTC Chatbot - Trợ lý AI giáo dục chuẩn mực.
-NHIỆM VỤ: Trả lời câu hỏi dựa trên các [CHUNK] tri thức được cung cấp.
+        # Vẫn bắt buộc AI dùng ID để ta kiểm soát được nó không bịa
+        system_prompt = f"""Bạn là KTC Chatbot.
+NHIỆM VỤ: Trả lời dựa trên [CONTEXT].
 
-QUY TẮC BẮT BUỘC (VERIFIABLE GROUNDING):
-1. **Dựa hoàn toàn vào Context:** Không sử dụng kiến thức bên ngoài. Nếu không có thông tin, trả lời "Không tìm thấy thông tin trong SGK".
-2. **Trích dẫn định danh (Evidence-Based):** Cuối mỗi ý quan trọng, PHẢI ghi ID của chunk đã dùng. 
-   Format: [Nguồn ID: <chunk_id>]
-3. **Ngôn ngữ khoa học:** Khách quan, chính xác, không dùng từ cảm thán.
-4. **Định dạng:** Dùng Markdown cho code/bảng.
+QUY TẮC TUYỆT ĐỐI:
+1. Chỉ dùng thông tin trong Context.
+2. Cuối mỗi ý quan trọng, BẮT BUỘC ghi ID nguồn. Format: [ID: <chunk_id>]
+3. Giữ nguyên ID, không được tự bịa ra ID mới.
 
-[CONTEXT BẮT ĐẦU]
+[CONTEXT]
 {full_context}
-[CONTEXT KẾT THÚC]
 """
 
         try:
-            # Lưu ý: Không stream ngay lập tức để thực hiện Validation Layer
+            # Tắt stream để validate toàn vẹn trước khi trả về
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                stream=False, # Tắt stream để validate toàn vẹn
+                stream=False,
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=1500
             )
             raw_response = completion.choices[0].message.content
 
-            # --- 5. Post-Generation Validation Layer ---
-            # Kiểm tra xem AI có bịa đặt citations hoặc trả lời không căn cứ không
+            # --- 5. Validation & Translation Layer (Xử lý hiển thị) ---
             
-            # Regex tìm các citation dạng [Nguồn ID: ...]
-            found_citations = re.findall(r'\[Nguồn ID: (.*?)\]', raw_response)
+            # Hàm thay thế ID bằng Text hiển thị
+            def citation_replacer(match):
+                found_id = match.group(1)
+                if found_id in id_to_readable:
+                    # Đổi ID thành tên bài học in nghiêng đậm
+                    return f" *(Nguồn: {id_to_readable[found_id]})*"
+                else:
+                    return "" # Xóa citation bịa đặt
+
+            # Kiểm tra xem có citation nào sai (Hallucination) không
+            found_ids = re.findall(r'\[ID: (.*?)\]', raw_response)
+            has_hallucination = False
+            for fid in found_ids:
+                if fid not in valid_uids:
+                    has_hallucination = True
+                    break
             
-            # Nếu AI đưa ra câu trả lời khẳng định nhưng KHÔNG trích dẫn ID nào -> Cảnh báo hoặc reject
-            # Nếu AI trích dẫn ID không có trong valid_uids -> Hallucination -> Reject
-            
-            is_valid = True
-            if found_citations:
-                for cid in found_citations:
-                    if cid.strip() not in valid_uids:
-                        is_valid = False # Hallucination citation
-                        break
-            
-            # Logic hiển thị
-            if not is_valid:
-                yield "Hệ thống phát hiện câu trả lời không trích dẫn đúng nguồn dữ liệu gốc. Vui lòng thử lại với câu hỏi cụ thể hơn."
+            if has_hallucination:
+                 yield "Hệ thống phát hiện AI đang cố gắng trích dẫn nguồn không tồn tại trong SGK. Kết quả bị hủy để đảm bảo tính chính xác khoa học."
             else:
-                # Nếu hợp lệ, giả lập stream để trả về UI (do hàm main mong đợi iterable)
-                # Tách text để tạo hiệu ứng gõ phím nhẹ (optional) hoặc yield cả cục
-                yield raw_response
+                # Regex tìm chuỗi [ID: xyz] và thay bằng tên bài học
+                final_friendly_response = re.sub(r'\[ID: (.*?)\]', citation_replacer, raw_response)
+                yield final_friendly_response
                 
         except Exception as e:
             yield f"Lỗi xử lý AI: {str(e)}"
