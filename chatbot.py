@@ -1,13 +1,18 @@
-# =========================
-# KTC CHATBOT – RAG QUỐC GIA v1.1
-# Giữ nguyên UI – Nâng cấp RAG học thuật
-# =========================
+# =========================================================
+# KTC CHATBOT – RAG CHUẨN QUỐC GIA (v1.1.1 – STABLE)
+# Giữ nguyên UI | Sửa triệt để FlashRank | Production ready
+# =========================================================
 
-import os, glob, base64, shutil, re
+import os
+import glob
+import base64
+import shutil
+import re
 import streamlit as st
+
 from typing import List, Dict
 
-# ===== IMPORTS =====
+# ===================== DEPENDENCIES ======================
 try:
     import nest_asyncio
     nest_asyncio.apply()
@@ -20,16 +25,14 @@ try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     from groq import Groq
-    from flashrank import Ranker, RerankRequest
+    from flashrank import Ranker
 
-    DEPENDENCIES_OK = True
-except ImportError as e:
-    DEPENDENCIES_OK = False
-    IMPORT_ERROR = str(e)
+    DEP_OK = True
+except Exception as e:
+    DEP_OK = False
+    DEP_ERROR = str(e)
 
-# =========================
-# CONFIG
-# =========================
+# ========================= CONFIG =========================
 st.set_page_config(
     page_title="KTC Chatbot - THCS & THPT Phạm Kiệt",
     page_icon="LOGO.jpg",
@@ -37,96 +40,107 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-class AppConfig:
+class Config:
     LLM_MODEL = "llama-3.1-8b-instant"
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     RERANK_MODEL = "ms-marco-TinyBERT-L-2-v2"
 
     PDF_DIR = "PDF_KNOWLEDGE"
-    VECTOR_DB_PATH = "faiss_db_index"
-    PROCESSED_MD_DIR = "PROCESSED_MD"
+    VECTOR_DB = "faiss_index"
+    MD_CACHE = "MD_CACHE"
     RERANK_CACHE = "./opt"
 
     CHUNK_SIZE = 1000
     CHUNK_OVERLAP = 200
-    RETRIEVAL_K = 30
+    RETRIEVE_K = 30
     FINAL_K = 5
 
-    BM25_WEIGHT = 0.4
-    FAISS_WEIGHT = 0.6
-    LLM_TEMPERATURE = 0.0
+    BM25_W = 0.4
+    FAISS_W = 0.6
 
-    LOGO_PROJECT = "LOGO.jpg"
-    LOGO_SCHOOL = "LOGO PKS.png"
-
-# =========================
-# UI (GIỮ NGUYÊN)
-# =========================
-class UIManager:
+# ========================= UI =============================
+class UI:
     @staticmethod
-    def get_img_as_base64(path):
-        if not os.path.exists(path): return ""
+    def b64(path):
+        if not os.path.exists(path):
+            return ""
         with open(path, "rb") as f:
             return base64.b64encode(f.read()).decode()
 
     @staticmethod
-    def inject_custom_css():
-        st.markdown("""<style>/* GIỮ NGUYÊN CSS CỦA BẠN */</style>""",
-                    unsafe_allow_html=True)
+    def css():
+        st.markdown("<style>/* giữ nguyên css */</style>", unsafe_allow_html=True)
 
     @staticmethod
-    def render_sidebar():
+    def sidebar():
         with st.sidebar:
-            if os.path.exists(AppConfig.LOGO_SCHOOL):
-                st.image(AppConfig.LOGO_SCHOOL, use_container_width=True)
-            st.markdown("### ⚙️ Tiện ích")
+            if os.path.exists("LOGO PKS.png"):
+                st.image("LOGO PKS.png", use_container_width=True)
+
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
-            if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
-                if os.path.exists(AppConfig.VECTOR_DB_PATH):
-                    shutil.rmtree(AppConfig.VECTOR_DB_PATH)
+
+            if st.button("🔄 Cập nhật dữ liệu", use_container_width=True):
+                if os.path.exists(Config.VECTOR_DB):
+                    shutil.rmtree(Config.VECTOR_DB)
                 st.session_state.pop("retriever", None)
                 st.rerun()
 
     @staticmethod
-    def render_header():
-        logo = UIManager.get_img_as_base64(AppConfig.LOGO_PROJECT)
+    def header():
+        logo = UI.b64("LOGO.jpg")
         st.markdown(f"""
-        <div class="main-header">
+        <div style="display:flex;justify-content:space-between;align-items:center">
             <div>
                 <h1>KTC CHATBOT</h1>
                 <p>Học Tin dễ dàng – Thao tác vững vàng</p>
             </div>
-            <img src="data:image/jpeg;base64,{logo}" width="90">
+            <img src="data:image/png;base64,{logo}" width="90">
         </div>
         """, unsafe_allow_html=True)
 
-# =========================
-# RAG ENGINE (QUỐC GIA)
-# =========================
-class RAGEngine:
+# ========================= RAG CORE =======================
+class RAG:
 
     @staticmethod
-    def load_groq():
-        key = st.secrets.get("GROQ_API_KEY")
-        return Groq(api_key=key) if key else None
+    def llm():
+        return Groq(api_key=st.secrets.get("GROQ_API_KEY"))
 
     @staticmethod
-    def load_embeddings():
+    def embeddings():
         return HuggingFaceEmbeddings(
-            model_name=AppConfig.EMBEDDING_MODEL,
+            model_name=Config.EMBEDDING_MODEL,
             encode_kwargs={"normalize_embeddings": True}
         )
 
     @staticmethod
-    def load_reranker():
-        return Ranker(model_name=AppConfig.RERANK_MODEL, cache_dir=AppConfig.RERANK_CACHE)
+    def reranker():
+        return Ranker(model_name=Config.RERANK_MODEL, cache_dir=Config.RERANK_CACHE)
 
-    # ===== TÁCH CẤU TRÚC SGK =====
     @staticmethod
-    def extract_structure(md: str) -> List[Dict]:
-        blocks, lesson, section = [], "Không xác định", "Không xác định"
+    def parse_pdf(pdf):
+        os.makedirs(Config.MD_CACHE, exist_ok=True)
+        md_path = f"{Config.MD_CACHE}/{os.path.basename(pdf)}.md"
+
+        if os.path.exists(md_path):
+            return open(md_path, encoding="utf-8").read()
+
+        parser = LlamaParse(
+            api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
+            result_type="markdown",
+            language="vi"
+        )
+
+        md = parser.load_data(pdf)[0].text
+        open(md_path, "w", encoding="utf-8").write(md)
+        return md
+
+    @staticmethod
+    def extract_blocks(md: str) -> List[Dict]:
+        blocks = []
+        lesson, section = "Không rõ", "Không rõ"
+
         for line in md.splitlines():
             line = line.strip()
             if re.match(r"^#\s*Bài\s+\d+", line, re.I):
@@ -137,131 +151,121 @@ class RAGEngine:
                 blocks.append({
                     "lesson": lesson,
                     "section": section,
-                    "content": line
+                    "text": line
                 })
         return blocks
 
     @staticmethod
-    def parse_pdf(pdf):
-        os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-        md_path = f"{AppConfig.PROCESSED_MD_DIR}/{os.path.basename(pdf)}.md"
-        if os.path.exists(md_path):
-            return open(md_path, encoding="utf-8").read()
-
-        parser = LlamaParse(
-            api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
-            result_type="markdown",
-            language="vi"
-        )
-        md = parser.load_data(pdf)[0].text
-        open(md_path, "w", encoding="utf-8").write(md)
-        return md
-
-    @staticmethod
-    def load_documents():
+    def documents():
         docs = []
-        for pdf in glob.glob(f"{AppConfig.PDF_DIR}/*.pdf"):
-            md = RAGEngine.parse_pdf(pdf)
-            for block in RAGEngine.extract_structure(md):
+        for pdf in glob.glob(f"{Config.PDF_DIR}/*.pdf"):
+            md = RAG.parse_pdf(pdf)
+            for b in RAG.extract_blocks(md):
                 docs.append(Document(
-                    page_content=block["content"],
+                    page_content=b["text"],
                     metadata={
                         "source": os.path.basename(pdf),
-                        "lesson": block["lesson"],
-                        "section": block["section"],
-                        "doc_type": "SGK Tin học"
+                        "lesson": b["lesson"],
+                        "section": b["section"]
                     }
                 ))
         return docs
 
     @staticmethod
-    def build_retriever(emb):
-        if os.path.exists(AppConfig.VECTOR_DB_PATH):
-            db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, emb, allow_dangerous_deserialization=True)
+    def retriever(emb):
+        if os.path.exists(Config.VECTOR_DB):
+            db = FAISS.load_local(Config.VECTOR_DB, emb, allow_dangerous_deserialization=True)
         else:
-            docs = RAGEngine.load_documents()
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=AppConfig.CHUNK_SIZE,
-                chunk_overlap=AppConfig.CHUNK_OVERLAP
+                chunk_size=Config.CHUNK_SIZE,
+                chunk_overlap=Config.CHUNK_OVERLAP
             )
-            chunks = splitter.split_documents(docs)
+            chunks = splitter.split_documents(RAG.documents())
             db = FAISS.from_documents(chunks, emb)
-            db.save_local(AppConfig.VECTOR_DB_PATH)
+            db.save_local(Config.VECTOR_DB)
 
         bm25 = BM25Retriever.from_documents(list(db.docstore._dict.values()))
-        bm25.k = AppConfig.RETRIEVAL_K
+        bm25.k = Config.RETRIEVE_K
 
-        faiss = db.as_retriever(search_type="mmr",
-                                search_kwargs={"k": AppConfig.RETRIEVAL_K})
+        faiss = db.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": Config.RETRIEVE_K}
+        )
 
         return EnsembleRetriever(
             retrievers=[bm25, faiss],
-            weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
+            weights=[Config.BM25_W, Config.FAISS_W]
         )
 
     @staticmethod
     def answer(client, retriever, query):
         docs = retriever.invoke(query)
-        ranker = RAGEngine.load_reranker()
+        ranker = RAG.reranker()
 
-        passages = [{"id": i, "text": d.page_content, "meta": d.metadata}
-                    for i, d in enumerate(docs)]
-        ranked = ranker.rank(RerankRequest(query=query, passages=passages))
+        passages = [
+            {"text": d.page_content, "meta": d.metadata}
+            for d in docs
+        ]
 
-        final_docs = ranked[:AppConfig.FINAL_K]
-        if not final_docs:
-            return "Không tìm thấy thông tin trong SGK.", []
+        ranked = ranker.rank(query=query, passages=passages)
+        ranked = ranked[:Config.FINAL_K]
 
-        context, sources = "", set()
-        for r in final_docs:
-            m = r["meta"]
-            sources.add(f"{m['source']} – {m['lesson']} – {m['section']}")
-            context += f"{r['text']}\n\n"
+        if not ranked:
+            return "Không tìm thấy thông tin phù hợp trong tài liệu.", []
 
-        prompt = f"""
-Bạn là trợ lý học tập AI.
+        context = ""
+        sources = set()
+
+        for r in ranked:
+            meta = r.get("meta", {})
+            context += r.get("text", "") + "\n\n"
+            sources.add(
+                f"{meta.get('source','')} – {meta.get('lesson','')} – {meta.get('section','')}"
+            )
+
+        system_prompt = f"""
+Bạn là trợ lý học tập.
 Chỉ trả lời dựa trên CONTEXT.
-Nếu không có, nói rõ không tìm thấy.
+Nếu CONTEXT không đủ, hãy nói rõ không có thông tin.
 
 [CONTEXT]
 {context}
 """
 
         stream = client.chat.completions.create(
-            model=AppConfig.LLM_MODEL,
+            model=Config.LLM_MODEL,
             messages=[
-                {"role": "system", "content": prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query}
             ],
-            stream=True,
-            temperature=0
+            temperature=0,
+            stream=True
         )
+
         return stream, list(sources)
 
-# =========================
-# MAIN
-# =========================
+# ========================= MAIN ===========================
 def main():
-    if not DEPENDENCIES_OK:
-        st.error(IMPORT_ERROR)
+    if not DEP_OK:
+        st.error(DEP_ERROR)
         return
 
-    UIManager.inject_custom_css()
-    UIManager.render_sidebar()
-    UIManager.render_header()
+    UI.css()
+    UI.sidebar()
+    UI.header()
 
     if "messages" not in st.session_state:
         st.session_state.messages = [{
             "role": "assistant",
-            "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ."
+            "content": "👋 Chào bạn! Tôi sẵn sàng hỗ trợ học tập Tin học."
         }]
 
-    client = RAGEngine.load_groq()
+    client = RAG.llm()
 
     if "retriever" not in st.session_state:
-        with st.spinner("🚀 Khởi tạo tri thức SGK..."):
-            emb = RAGEngine.load_embeddings()
-            st.session_state.retriever = RAGEngine.build_retriever(emb)
+        with st.spinner("Khởi tạo tri thức SGK..."):
+            emb = RAG.embeddings()
+            st.session_state.retriever = RAG.retriever(emb)
 
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
@@ -270,18 +274,21 @@ def main():
     q = st.chat_input("Nhập câu hỏi...")
     if q:
         st.session_state.messages.append({"role": "user", "content": q})
+
         with st.chat_message("assistant"):
-            stream, sources = RAGEngine.answer(client, st.session_state.retriever, q)
+            stream, sources = RAG.answer(client, st.session_state.retriever, q)
             ans = ""
             for c in stream:
                 if c.choices[0].delta.content:
                     ans += c.choices[0].delta.content
                     st.markdown(ans + "▌")
             st.markdown(ans)
+
             if sources:
                 with st.expander("📚 Nguồn SGK"):
                     for s in sources:
                         st.markdown(f"- {s}")
+
         st.session_state.messages.append({"role": "assistant", "content": ans})
 
 if __name__ == "__main__":
