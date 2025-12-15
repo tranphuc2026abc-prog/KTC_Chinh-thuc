@@ -264,15 +264,35 @@ class RAGEngine:
 
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
+        """
+        FIXED (Thầy Khanh Request): 
+        Sử dụng REGEX mạnh để bắt các header tiếng Việt trong SGK (Chương, Bài)
+        thay vì chỉ dựa vào Markdown (#).
+        """
         lines = text.split('\n')
         chunks = []
         
+        # Default values (Placeholder)
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
         
         buffer = []
+
+        # --- REGEX PATTERNS CHO SGK VIỆT NAM ---
+        # Bắt: "CHƯƠNG I", "Chương 1", "CHƯƠNG III." (Bất chấp hoa thường, bold, heading)
+        p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
         
+        # Bắt: "BÀI 1", "Bài 2", "BÀI 10:"
+        p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
+        
+        # Bắt Section con: "1.", "I.", "a)" hoặc Markdown ###
+        p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
+
+        def clean_header(text):
+            # Loại bỏ các ký tự Markdown thừa để Metadata sạch đẹp
+            return text.replace('#', '').replace('*', '').strip()
+
         def commit_chunk(buf, meta):
             if not buf: return
             content = "\n".join(buf).strip()
@@ -286,6 +306,7 @@ class RAGEngine:
                 "chapter": current_chapter,
                 "lesson": current_lesson,
                 "section": current_section,
+                # Tạo context string để LLM hiểu vị trí kiến thức
                 "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
@@ -293,24 +314,37 @@ class RAGEngine:
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
         for line in lines:
-            line = line.strip()
-            if not line: continue
+            line_stripped = line.strip()
+            if not line_stripped: continue
             
-            if line.startswith("# "): 
+            # Ưu tiên check Regex trước
+            if p_chapter.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_chapter = line.replace("# ", "").strip()
-                current_lesson = "Tổng quan"
-                current_section = "Tổng quan"
-            elif line.startswith("## "): 
+                current_chapter = clean_header(line_stripped)
+                current_lesson = "Tổng quan chương" # Reset lesson khi qua chương mới
+                current_section = "Giới thiệu"
+            
+            elif p_lesson.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_lesson = line.replace("## ", "").strip()
-                current_section = "Tổng quan"
-            elif line.startswith("### "): 
+                current_lesson = clean_header(line_stripped)
+                current_section = "Tổng quan bài"
+                
+            elif p_section.match(line_stripped) or line_stripped.startswith("### "):
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_section = line.replace("### ", "").strip()
+                current_section = clean_header(line_stripped)
+                
+            # Fallback cũ (giữ lại để an toàn)
+            elif line_stripped.startswith("# "): 
+                commit_chunk(buffer, source_meta)
+                buffer = []
+                current_chapter = clean_header(line_stripped)
+            elif line_stripped.startswith("## "): 
+                commit_chunk(buffer, source_meta)
+                buffer = []
+                current_lesson = clean_header(line_stripped)
             else:
                 buffer.append(line)
         
@@ -460,7 +494,17 @@ class RAGEngine:
             chapter = doc.metadata.get('chapter', 'Chương ?')
             lesson = doc.metadata.get('lesson', 'Bài ?')
             
-            citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+            # --- CITATION LOGIC FIX (THẦY KHANH REQUEST) ---
+            # Kiểm tra xem metadata có phải là giá trị mặc định hay không
+            is_default_chapter = (chapter == "Chương mở đầu")
+            is_default_lesson = (lesson == "Bài mở đầu" or lesson == "Tổng quan chương")
+            
+            if is_default_chapter and is_default_lesson:
+                 # Nếu cả 2 đều chưa xác định -> Fallback an toàn
+                 citation_display = f"📖 {src_clean} ➜ (Vị trí chưa xác định rõ)"
+            else:
+                 # Hiển thị bình thường
+                 citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
             valid_uids.add(uid)
             uid_to_citation_text[uid] = citation_display
@@ -505,8 +549,6 @@ YÊU CẦU NGHIÊM NGẶT:
             # --- TẦNG 4: REGEX "LƯỚI QUÉT RỘNG" (Fix triệt để) ---
             
             # Regex này chấp nhận mọi biến thể mà LLM lỡ lời sinh ra:
-            # Nó bắt: [ + (bất kỳ chữ gì như Nguồn, Refer, ID) + dấu hai chấm + MÃ 8 KÝ TỰ + ]
-            # Ví dụ bắt được hết: [ID: 12345678], [Nguồn ID: 12345678], [Refer: 12345678]
             pattern_broad = r'\[.*[:\s]([a-zA-Z0-9]{8})\s*\]'
             
             def citation_mapper(match):
