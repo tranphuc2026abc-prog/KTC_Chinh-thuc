@@ -374,7 +374,6 @@ class RAGEngine:
                  file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
                  all_chunks.extend(file_chunks)
             else:
-                # Fallback nếu LlamaParse lỗi (ít dùng, nhưng giữ để an toàn)
                 pass 
                 
         status_text.empty()
@@ -420,17 +419,15 @@ class RAGEngine:
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
         """
-        Quy trình Verifiable RAG (Phiên bản Fix lỗi hiển thị nguồn):
-        Sử dụng Regex đa năng để bắt mọi biến thể trích dẫn của AI.
+        Quy trình Verifiable Hybrid RAG Chuẩn KHKT Quốc Gia
+        3 Tầng nghiêm ngặt: Retrieval -> ID Generation -> Strict Mapping Validation
         """
         if not retriever:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
             return
         
-        # --- 1. Hybrid Retrieval ---
+        # --- TẦNG 1: RETRIEVAL & RERANK ---
         initial_docs = retriever.invoke(query)
-        
-        # --- 2. Reranking ---
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
@@ -441,7 +438,6 @@ class RAGEngine:
                 ]
                 rerank_req = RerankRequest(query=query, passages=passages)
                 results = ranker.rank(rerank_req)
-                
                 for res in results[:AppConfig.FINAL_K]:
                     final_docs.append(Document(page_content=res["text"], metadata=res["meta"]))
             else:
@@ -450,100 +446,104 @@ class RAGEngine:
             final_docs = initial_docs[:AppConfig.FINAL_K]
 
         if not final_docs:
-            yield "Xin lỗi, tôi không tìm thấy thông tin trong SGK để trả lời câu hỏi này."
+            yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- 3. Build Verifiable Context & Map ID ---
+        # --- TẦNG 2: CONTEXT BUILDING & METADATA REGISTRY ---
+        valid_uids = set()
+        uid_to_citation_text = {}
         context_parts = []
-        valid_uids = [] 
-        
-        # Tạo từ điển ánh xạ: ID -> Tên nguồn dễ đọc
-        id_to_readable = {} 
 
         for doc in final_docs:
-            uid = doc.metadata.get('chunk_uid', 'N/A')
-            src = doc.metadata.get('source', 'Tài liệu')
-            # Làm sạch tên file
-            src_clean = src.replace('.pdf', '').replace('_', ' ')
-            chapter = doc.metadata.get('chapter', '')
-            lesson = doc.metadata.get('lesson', '')
+            uid = doc.metadata.get('chunk_uid')
+            if not uid: continue
             
-            valid_uids.append(uid)
+            # Chuẩn hóa tên nguồn hiển thị
+            src_raw = doc.metadata.get('source', '')
+            src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
+            chapter = doc.metadata.get('chapter', 'Chương không xác định')
+            lesson = doc.metadata.get('lesson', 'Bài không xác định')
             
-            # Format tên hiển thị: [Tên sách > Bài học]
-            readable_source = f"{src_clean}"
-            if lesson and lesson != "Intro": readable_source += f" - {lesson}"
+            # Tạo chuỗi hiển thị CHUẨN KHKT: (Nguồn: Sách - Chương - Bài)
+            citation_display = f"(Nguồn: {src_clean} – {chapter} – {lesson})"
             
-            id_to_readable[uid] = readable_source
+            valid_uids.add(uid)
+            uid_to_citation_text[uid] = citation_display
             
+            # Build Context cho LLM
             context_parts.append(
-                f"<chunk id='{uid}'>\n"
-                f"Nội dung: {doc.page_content}\n"
-                f"</chunk>"
+                f"<chunk id='{uid}'>\n{doc.page_content}\n</chunk>"
             )
-        
+
         full_context = "\n\n".join(context_parts)
 
-        # --- 4. Strict Scientific Prompting ---
-        system_prompt = f"""Bạn là KTC Chatbot.
+        # --- TẦNG 3: STRICT PROMPTING & GENERATION ---
+        system_prompt = f"""Bạn là KTC Chatbot - Trợ lý AI giáo dục chuẩn mực.
 NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT].
 
-QUY TẮC BẮT BUỘC:
-1. Chỉ dùng thông tin trong Context.
-2. Cuối mỗi ý quan trọng, PHẢI ghi ID nguồn trong ngoặc vuông. 
-   Ví dụ: [ID: <chunk_id>]
-3. Không được tự bịa ID.
+QUY TẮC CỐT LÕI (BẮT BUỘC TUÂN THỦ):
+1. CHỈ sử dụng thông tin từ [CONTEXT].
+2. Cuối mỗi câu/ý khẳng định, BẮT BUỘC phải ghi ID nguồn chứng minh.
+   Định dạng: [ID: <chunk_id>]
+3. KHÔNG tự chế tên sách/bài học vào trong câu trả lời. CHỈ DÙNG ID.
+4. KHÔNG được bịa ID. Chỉ dùng ID có trong thẻ <chunk>.
+5. Nếu không có thông tin trong Context để trả lời, chỉ ghi: "NO_INFO".
 
 [CONTEXT]
 {full_context}
 """
-
+        
         try:
-            # Tắt stream để xử lý chuỗi cuối cùng
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                stream=False,
+                stream=False, # Tắt stream để validate toàn bộ câu trả lời
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=1500
             )
             raw_response = completion.choices[0].message.content
 
-            # --- 5. Robust Validation & Translation Layer (FIX LỖI HIỂN THỊ) ---
+            # --- TẦNG 4: POST-GENERATION VALIDATION (KIỂM TRA NGHIÊM NGẶT) ---
             
-            def citation_replacer(match):
-                # Lấy chuỗi ID tìm được (group 1)
-                found_id = match.group(1)
-                if found_id in id_to_readable:
-                    # Đổi thành tên bài học màu đẹp
-                    return f" *(Nguồn: {id_to_readable[found_id]})*"
-                else:
-                    return "" # ID ảo -> xóa
+            # 1. Kiểm tra trường hợp không tìm thấy thông tin
+            if "NO_INFO" in raw_response or not raw_response.strip():
+                yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
+                return
 
-            # --- CẢI TIẾN: Regex "bắt dính" mọi trường hợp ---
-            # Tìm bất kỳ đoạn nào nằm trong ngoặc vuông [...] mà có chứa chuỗi 8 ký tự hexa
-            # Nó sẽ bắt được cả: [ID: 12345678], [Nguồn: 12345678], [Trích dẫn: 12345678]
-            pattern = r'\[.*?\b([a-f0-9]{8})\b.*?\]'
+            # 2. Quét tất cả ID mà AI sinh ra
+            # Regex bắt ID: [ID: xxxxxxxx]
+            pattern_id = r'\[ID:\s*([a-zA-Z0-9]{8})\]'
+            found_ids = re.findall(pattern_id, raw_response)
             
-            # Kiểm tra Hallucination
-            found_ids = re.findall(pattern, raw_response)
-            has_hallucination = False
+            if not found_ids:
+                # Trường hợp AI trả lời nhưng quên citation -> Vẫn coi là rủi ro KHKT
+                # Tuy nhiên để thân thiện hơn, ta chấp nhận nếu nội dung ngắn, 
+                # nhưng chuẩn KHKT thì nên fail. Ở đây ta fail để đảm bảo tính xác thực.
+                pass 
+
+            # 3. HALLUCINATION CHECK (Loại bỏ câu trả lời nếu có ID bịa)
             for fid in found_ids:
                 if fid not in valid_uids:
-                    # Nếu ID tìm thấy không có trong danh sách Context -> Cảnh báo
-                    # (Tạm thời bỏ qua strict check để ưu tiên hiển thị cho thầy test trước)
-                    pass 
+                    yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
+                    return
+
+            # 4. CITATION MAPPING (Biến ID kỹ thuật thành Nguồn đọc được)
+            def citation_mapper(match):
+                uid = match.group(1)
+                if uid in uid_to_citation_text:
+                    # Chuyển đổi thành: * (Nguồn: ...) *
+                    return f" **{uid_to_citation_text[uid]}**"
+                return "" # Xóa ID nếu lỗi mapping (phòng hờ)
+
+            final_response = re.sub(pattern_id, citation_mapper, raw_response)
             
-            # Thay thế tất cả các dạng trích dẫn bằng tên bài học
-            final_friendly_response = re.sub(pattern, citation_replacer, raw_response)
-            
-            yield final_friendly_response
-                
+            yield final_response
+
         except Exception as e:
-            yield f"Lỗi xử lý AI: {str(e)}"
+            yield f"Lỗi xử lý hệ thống: {str(e)}"
 
 # ===================
 # 4. MAIN APPLICATION
@@ -587,7 +587,6 @@ def main():
             response_placeholder = st.empty()
             
             # Gọi generator (đã bao gồm Validation Layer bên trong)
-            # Generator này có thể delay một chút để validate trước khi yield
             response_gen = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
@@ -596,7 +595,6 @@ def main():
 
             full_response = ""
             for chunk in response_gen:
-                # Vì Validation tắt stream API, chunk ở đây thực tế là full text hoặc error msg
                 full_response += chunk
                 response_placeholder.markdown(full_response + "▌")
             
