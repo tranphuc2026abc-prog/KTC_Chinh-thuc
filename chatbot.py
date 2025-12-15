@@ -9,7 +9,7 @@ import glob
 import uuid
 import shutil
 import base64
-from typing import List, Dict
+from typing import List, Set
 
 import streamlit as st
 
@@ -65,8 +65,13 @@ class AppConfig:
 # ============================================================
 
 REQUIRED_CHUNK_METADATA = [
-    "book", "grade", "chapter", "lesson",
-    "section", "chunk_type", "chunk_uid"
+    "book",
+    "grade",
+    "chapter",
+    "lesson",
+    "section",
+    "chunk_type",
+    "chunk_uid"
 ]
 
 # ============================================================
@@ -116,72 +121,61 @@ class UIManager:
 
 class RAGEngine:
 
+    # --------------------------------------------------------
+    # PDF → MARKDOWN (NATIONAL SAFE)
+    # --------------------------------------------------------
     @staticmethod
-def parse_pdf(pdf_path: str) -> str:
-    os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-    md_path = os.path.join(
-        AppConfig.PROCESSED_MD_DIR,
-        os.path.basename(pdf_path) + ".md"
-    )
+    def parse_pdf(pdf_path: str) -> str:
+        os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
+        md_path = os.path.join(
+            AppConfig.PROCESSED_MD_DIR,
+            os.path.basename(pdf_path) + ".md"
+        )
 
-    # Nếu đã parse rồi thì dùng lại
-    if os.path.exists(md_path):
-        with open(md_path, encoding="utf-8") as f:
-            return f.read()
+        if os.path.exists(md_path):
+            with open(md_path, encoding="utf-8") as f:
+                return f.read()
 
-    parser = LlamaParse(
-        api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
-        result_type="markdown",
-        language="vi"
-    )
+        parser = LlamaParse(
+            api_key=st.secrets.get("LLAMA_CLOUD_API_KEY"),
+            result_type="markdown",
+            language="vi"
+        )
 
-    docs = parser.load_data(pdf_path)
+        docs = parser.load_data(pdf_path)
 
-    # ===============================
-    # NATIONAL SAFE GUARD – BẮT BUỘC
-    # ===============================
-    if not docs or not hasattr(docs[0], "text") or not docs[0].text.strip():
-        # KHÔNG được tạo tri thức giả
-        # Trả về chuỗi rỗng để tầng chunking tự loại bỏ
-        return ""
+        # HARD GUARD: NO FAKE KNOWLEDGE
+        if not docs or not hasattr(docs[0], "text") or not docs[0].text.strip():
+            return ""
 
-    text = docs[0].text
+        text = docs[0].text
 
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(text)
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(text)
 
-    return text
-
-
-    # ===============================
-    # NATIONAL SAFE GUARD – BẮT BUỘC
-    # ===============================
-    if not docs or not hasattr(docs[0], "text") or not docs[0].text.strip():
-        # KHÔNG được tạo tri thức giả
-        # Trả về chuỗi rỗng để tầng chunking tự loại bỏ
-        return ""
-
-    text = docs[0].text
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(text)
-
-    return text
-
+        return text
 
     # --------------------------------------------------------
     # STRUCTURAL / SEMANTIC CHUNKING (MANDATORY)
     # --------------------------------------------------------
     @staticmethod
     def structural_chunk(md_text: str, source: str) -> List[Document]:
+        if not md_text or not md_text.strip():
+            return []
+
         docs: List[Document] = []
 
         chapter = lesson = section = ""
         buffer: List[str] = []
 
-        def flush(chunk_text: str):
-            if not chunk_text.strip():
+        def flush():
+            nonlocal buffer
+            text = "\n".join(buffer).strip()
+            buffer = []
+
+            if not text:
                 return
+
             uid = str(uuid.uuid4())
             metadata = {
                 "book": source,
@@ -189,10 +183,15 @@ def parse_pdf(pdf_path: str) -> str:
                 "chapter": chapter,
                 "lesson": lesson,
                 "section": section,
-                "chunk_type": RAGEngine._infer_chunk_type(chunk_text),
+                "chunk_type": RAGEngine._infer_chunk_type(text),
                 "chunk_uid": uid
             }
-            docs.append(Document(page_content=chunk_text.strip(), metadata=metadata))
+
+            for key in REQUIRED_CHUNK_METADATA:
+                if key not in metadata:
+                    return
+
+            docs.append(Document(page_content=text, metadata=metadata))
 
         for line in md_text.splitlines():
             h1 = AppConfig.H1_RE.match(line)
@@ -200,23 +199,20 @@ def parse_pdf(pdf_path: str) -> str:
             h3 = AppConfig.H3_RE.match(line)
 
             if h1:
-                flush("\n".join(buffer))
-                buffer = []
-                chapter = h1.group(1)
+                flush()
+                chapter = h1.group(1).strip()
                 lesson = section = ""
             elif h2:
-                flush("\n".join(buffer))
-                buffer = []
-                lesson = h2.group(1)
+                flush()
+                lesson = h2.group(1).strip()
                 section = ""
             elif h3:
-                flush("\n".join(buffer))
-                buffer = []
-                section = h3.group(1)
+                flush()
+                section = h3.group(1).strip()
             else:
                 buffer.append(line)
 
-        flush("\n".join(buffer))
+        flush()
         return docs
 
     @staticmethod
@@ -244,10 +240,15 @@ def parse_pdf(pdf_path: str) -> str:
                 embeddings,
                 allow_dangerous_deserialization=True
             )
-            bm25 = BM25Retriever.from_documents(vectordb.docstore._dict.values())
+            docs = list(vectordb.docstore._dict.values())
+            bm25 = BM25Retriever.from_documents(docs)
             bm25.k = AppConfig.RETRIEVAL_K
+
             return EnsembleRetriever(
-                retrievers=[bm25, vectordb.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})],
+                retrievers=[
+                    bm25,
+                    vectordb.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+                ],
                 weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
             )
 
@@ -263,7 +264,10 @@ def parse_pdf(pdf_path: str) -> str:
         bm25.k = AppConfig.RETRIEVAL_K
 
         return EnsembleRetriever(
-            retrievers=[bm25, vectordb.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})],
+            retrievers=[
+                bm25,
+                vectordb.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+            ],
             weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
         )
 
@@ -275,7 +279,9 @@ def parse_pdf(pdf_path: str) -> str:
         client = Groq(api_key=st.secrets.get("GROQ_API_KEY"))
 
         context_text = "\n\n".join(
-            f"[{d.metadata['chunk_uid']}] {d.page_content}"
+            f"[{d.metadata['chunk_uid']}] "
+            f"({d.metadata['chapter']} – {d.metadata['lesson']})\n"
+            f"{d.page_content}"
             for d in contexts
         )
 
@@ -285,7 +291,7 @@ Sinh câu trả lời dựa trên tri thức SGK đã truy xuất.
 Mỗi ý trả lời PHẢI có trích dẫn theo mẫu:
 [Nguồn: <chunk_uid> – <chapter> – <lesson>]
 
-TRI THỨC:
+TRI THỨC SGK:
 {context_text}
 
 CÂU HỎI:
@@ -305,13 +311,16 @@ CÂU HỎI:
     # --------------------------------------------------------
     @staticmethod
     def validate_answer(answer: str, contexts: List[Document]) -> bool:
-        valid_uids = {d.metadata["chunk_uid"] for d in contexts}
+        valid_uids: Set[str] = {d.metadata["chunk_uid"] for d in contexts}
+
         cited = re.findall(r"\[Nguồn:\s*([^\]\s]+)", answer)
         if not cited:
             return False
+
         for uid in cited:
             if uid not in valid_uids:
                 return False
+
         return True
 
 # ============================================================
@@ -353,13 +362,16 @@ def main():
             docs = st.session_state.retriever.get_relevant_documents(query)
             docs = docs[:AppConfig.FINAL_K]
 
-            answer = RAGEngine.generate_answer(query, docs)
-            if not RAGEngine.validate_answer(answer, docs):
+            if not docs:
                 st.markdown("Không tìm thấy thông tin phù hợp trong SGK hiện có.")
             else:
-                st.markdown(answer)
+                answer = RAGEngine.generate_answer(query, docs)
+                if not RAGEngine.validate_answer(answer, docs):
+                    st.markdown("Không tìm thấy thông tin phù hợp trong SGK hiện có.")
+                else:
+                    st.markdown(answer)
 
-            st.session_state.messages.append({"role": "assistant", "content": st.session_state.messages[-1]["content"]})
+        st.session_state.messages.append({"role": "assistant", "content": st.session_state.messages[-1]["content"]})
 
 if __name__ == "__main__":
     main()
