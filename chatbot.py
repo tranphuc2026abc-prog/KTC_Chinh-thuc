@@ -6,6 +6,7 @@ import shutil
 import pickle
 import re
 import uuid
+import json
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
 
@@ -47,8 +48,9 @@ class AppConfig:
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     RERANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
 
-    # Paths
+    # Paths - CHUẨN KHOA HỌC
     PDF_DIR = "PDF_KNOWLEDGE"
+    MANIFEST_FILE = "manifest.json" # Ground Truth Metadata
     VECTOR_DB_PATH = "faiss_db_index"
     RERANK_CACHE = "./opt"
     PROCESSED_MD_DIR = "PROCESSED_MD" 
@@ -66,6 +68,9 @@ class AppConfig:
     FAISS_WEIGHT = 0.6     
 
     LLM_TEMPERATURE = 0.0 # Deterministic output for Science
+
+    # Hard Filter for KHKT
+    VALID_BO_SACH = "Kết nối tri thức với cuộc sống"
 
 # ===============================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
@@ -135,16 +140,16 @@ class UIManager:
             }
             /* Style cho Citation chuẩn KHKT */
             .citation-source {
-                font-size: 0.8em;
-                color: #ffffff; 
-                background-color: #d63384; /* Màu hồng đậm nổi bật */
-                padding: 3px 8px;
-                border-radius: 12px;
-                font-weight: 600;
-                margin-left: 5px;
-                display: inline-block;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-                border: none;
+                font-size: 0.75em;
+                color: #333; 
+                background-color: #f1f3f5;
+                padding: 8px 12px;
+                border-radius: 8px;
+                font-weight: 500;
+                margin-left: 0px;
+                display: block;
+                border-left: 4px solid #d63384; /* Màu hồng đậm nổi bật */
+                line-height: 1.4;
             }
             div.stButton > button {
                 border-radius: 8px; background-color: white; color: #0077b6;
@@ -195,7 +200,7 @@ class UIManager:
                 st.session_state.messages = []
                 st.rerun()
 
-            if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
+            if st.button("🔄 Cập nhật dữ liệu (Manifest)", use_container_width=True):
                 if os.path.exists(AppConfig.VECTOR_DB_PATH):
                     shutil.rmtree(AppConfig.VECTOR_DB_PATH)
                 st.session_state.pop('retriever_engine', None)
@@ -255,27 +260,23 @@ class RAGEngine:
         except Exception as e:
             return None
 
+    # --- [NEW] MANIFEST LOADER (Ground Truth) ---
     @staticmethod
-    def _detect_doc_type(source_name: str) -> str:
-        name_lower = source_name.lower()
-        if any(k in name_lower for k in ["on thi", "ôn thi"]):
-            return "Tài liệu ôn tập"
-        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
-            return "Tài liệu tham khảo"
-        if any(k in name_lower for k in ["sgk", "tin"]):
-            return "Tài liệu học tập"
-        return "Tài liệu tham khảo"
+    def _load_manifest() -> Dict:
+        manifest_path = os.path.join(AppConfig.PDF_DIR, AppConfig.MANIFEST_FILE)
+        if not os.path.exists(manifest_path):
+            return {}
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
     @staticmethod
-    def _detect_grade(filename: str) -> str:
-        filename = filename.lower()
-        if "10" in filename: return "10"
-        if "11" in filename: return "11"
-        if "12" in filename: return "12"
-        return "general"
-
-    @staticmethod
-    def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
+    def _structural_chunking(text: str, manifest_meta: dict) -> List[Document]:
+        """
+        Phân mảnh cấu trúc kết hợp với Metadata chính xác từ Manifest
+        """
         lines = text.split('\n')
         chunks = []
         
@@ -293,23 +294,24 @@ class RAGEngine:
         def clean_header(text):
             return text.replace('#', '').replace('*', '').strip()
 
-        def commit_chunk(buf, meta):
+        def commit_chunk(buf, base_meta):
             if not buf: return
             content = "\n".join(buf).strip()
             if len(content) < 50: return 
             
             chunk_uid = str(uuid.uuid4())[:8] # Generate 8-char UID
             
-            new_meta = meta.copy()
+            # Merge Metadata: Manifest (Static) + Text Analysis (Dynamic)
+            new_meta = base_meta.copy()
             new_meta.update({
                 "chunk_uid": chunk_uid,
                 "chapter": current_chapter,
                 "lesson": current_lesson,
                 "section": current_section,
+                # Context string for debug/search
                 "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
-            # Lưu ý: Không nhét metadata vào page_content để tránh nhiễu ngữ nghĩa
             chunks.append(Document(page_content=content, metadata=new_meta))
 
         for line in lines:
@@ -317,35 +319,35 @@ class RAGEngine:
             if not line_stripped: continue
             
             if p_chapter.match(line_stripped):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, manifest_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
                 current_lesson = "Tổng quan chương"
                 current_section = "Giới thiệu"
             
             elif p_lesson.match(line_stripped):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, manifest_meta)
                 buffer = []
                 current_lesson = clean_header(line_stripped)
                 current_section = "Tổng quan bài"
                 
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, manifest_meta)
                 buffer = []
                 current_section = clean_header(line_stripped)
                 
             elif line_stripped.startswith("# "): 
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, manifest_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
             elif line_stripped.startswith("## "): 
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, manifest_meta)
                 buffer = []
                 current_lesson = clean_header(line_stripped)
             else:
                 buffer.append(line)
         
-        commit_chunk(buffer, source_meta)
+        commit_chunk(buffer, manifest_meta)
         return chunks
 
     @staticmethod
@@ -368,7 +370,7 @@ class RAGEngine:
                 result_type="markdown",
                 language="vi",
                 verbose=True,
-                parsing_instruction="Đây là tài liệu giáo khoa Tin học. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc chương mục (#, ##, ###)."
+                parsing_instruction="Đây là tài liệu giáo khoa Tin học chuẩn. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc chương mục (#, ##, ###)."
             )
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
@@ -382,28 +384,47 @@ class RAGEngine:
 
     @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
+        """
+        Quy trình xử lý file dựa trên MANIFEST (Strict Mode)
+        """
         if not os.path.exists(pdf_dir):
             return []
         
+        # 1. Load Manifest
+        manifest = RAGEngine._load_manifest()
+        if not manifest:
+            st.warning("⚠️ Không tìm thấy file 'manifest.json' hoặc file bị lỗi. Vui lòng kiểm tra thư mục PDF_KNOWLEDGE.")
+            return []
+
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
         all_chunks: List[Document] = []
         status_text = st.empty()
 
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
-            status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
+            
+            # 2. Manifest Validation Check
+            if source_file not in manifest:
+                st.toast(f"🚫 Bỏ qua {source_file}: Không có trong Manifest.", icon="⚠️")
+                continue
+            
+            file_meta = manifest[source_file]
+            
+            # 3. Content Guard (Bộ sách Filter)
+            if file_meta.get("bo_sach") != AppConfig.VALID_BO_SACH:
+                st.toast(f"🚫 Bỏ qua {source_file}: Không thuộc bộ '{AppConfig.VALID_BO_SACH}'", icon="🛑")
+                continue
+
+            status_text.text(f"⏳ Đang xử lý: {source_file} ({file_meta['mon']} {file_meta['lop']})...")
             
             markdown_content = RAGEngine._parse_pdf_with_llama(file_path)
             
             if "ERROR" not in markdown_content and len(markdown_content) > 50:
-                 meta = {
-                     "source": source_file, 
-                     "grade": RAGEngine._detect_grade(source_file)
-                 }
-                 file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
+                 # Truyền Metadata chuẩn từ Manifest vào chunker
+                 file_chunks = RAGEngine._structural_chunking(markdown_content, file_meta)
                  all_chunks.extend(file_chunks)
             else:
-                pass 
+                st.error(f"Lỗi đọc nội dung file: {source_file}")
                 
         status_text.empty()
         return all_chunks
@@ -421,7 +442,7 @@ class RAGEngine:
         if not vector_db:
             chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
             if not chunk_docs:
-                st.error(f"Không tìm thấy tài liệu hoặc lỗi xử lý trong {AppConfig.PDF_DIR}")
+                st.error(f"Chưa có dữ liệu hợp lệ trong {AppConfig.PDF_DIR}. Vui lòng kiểm tra Manifest.")
                 return None
             
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
@@ -480,10 +501,10 @@ class RAGEngine:
             final_docs = initial_docs[:AppConfig.FINAL_K]
 
         if not final_docs:
-            yield "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
+            yield "Không tìm thấy thông tin phù hợp trong tài liệu KNTT hiện có."
             return
 
-        # --- TẦNG 2: BUILDING REGISTRY (SỔ CÁI ÁNH XẠ NGUỒN) ---
+        # --- TẦNG 2: BUILDING REGISTRY (SỔ CÁI ÁNH XẠ NGUỒN CHUẨN KHKT) ---
         citation_registry = {} 
         context_parts = []
 
@@ -491,20 +512,24 @@ class RAGEngine:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
-            # Xử lý tên hiển thị
-            src_raw = doc.metadata.get('source', '')
-            src_clean = src_raw.replace('.pdf', '').replace('_', ' ').strip()
-            chapter = doc.metadata.get('chapter', 'Chương ?').strip()
-            lesson = doc.metadata.get('lesson', 'Bài ?').strip()
+            # Lấy Metadata chuẩn từ Manifest (đã inject vào chunk)
+            m = doc.metadata
+            mon = m.get('mon', 'Tin học')
+            lop = m.get('lop', '')
+            bo_sach = m.get('bo_sach', AppConfig.VALID_BO_SACH)
+            loai_lieu = m.get('loai_tai_lieu', 'Tài liệu')
+            chapter = m.get('chapter', 'Chương ?')
+            lesson = m.get('lesson', 'Bài ?')
+            nxb = m.get('nxb', 'NXB Giáo dục Việt Nam')
             
-            # Logic rút gọn hiển thị
-            if chapter == "Chương mở đầu" and lesson == "Bài mở đầu":
-                 doc_type = RAGEngine._detect_doc_type(src_clean)
-                 human_readable_source = f"📖 {src_clean} ➜ {doc_type}" 
-            else:
-                 human_readable_source = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+            # Format hiển thị học thuật
+            citation_html = f"""
+            <b>📘 {mon} {lop} - {bo_sach}</b><br>
+            {loai_lieu} &gt; {chapter} &gt; {lesson}<br>
+            <i>{nxb}</i>
+            """
             
-            citation_registry[uid] = human_readable_source
+            citation_registry[uid] = citation_html
             
             # Đưa vào prompt cho AI
             context_parts.append(
@@ -514,18 +539,17 @@ class RAGEngine:
         full_context = "\n".join(context_parts)
 
         # --- TẦNG 3: PROMPT (NGHIÊM NGẶT - CITATION GATED) ---
-        # Yêu cầu LLM KHÔNG trích dẫn inline, mà chỉ output mã ở cuối cùng.
         
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý học tập môn Tin học.
-NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT].
+        system_prompt = f"""Bạn là KTC Chatbot, trợ lý học thuật.
+NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT] từ bộ sách "Kết nối tri thức với cuộc sống".
 
 QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
-1. Dựa hoàn toàn vào context để trả lời.
-2. TUYỆT ĐỐI KHÔNG ghi nguồn, tên sách hay chương bài trong nội dung câu trả lời.
-3. KHÔNG chèn mã [REF] vào giữa các câu.
-4. Chọn ĐÚNG 1 đoạn thông tin (chunk) quan trọng nhất dùng để tham chiếu.
-5. KẾT THÚC CÂU TRẢ LỜI bằng cú pháp duy nhất: [FINAL_REF:xxxxxxxx] (xxxxxxxx là ID của chunk).
-6. Nếu không tìm thấy thông tin: Hãy trả lời chính xác câu "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
+1. Dựa hoàn toàn vào context để trả lời. Không bịa đặt.
+2. TUYỆT ĐỐI KHÔNG tự viết nguồn, tên sách trong lời giải (Hệ thống sẽ tự thêm ở cuối).
+3. KHÔNG chèn mã [REF] lung tung.
+4. Chọn ĐÚNG 1 đoạn thông tin (chunk) quan trọng nhất.
+5. KẾT THÚC CÂU TRẢ LỜI bằng cú pháp: [FINAL_REF:xxxxxxxx] (xxxxxxxx là ID của chunk).
+6. Nếu không tìm thấy thông tin: Trả lời "Không tìm thấy thông tin phù hợp trong bộ sách này."
 
 [CONTEXT]
 {full_context}
@@ -549,7 +573,6 @@ QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
                 return
 
             # --- TẦNG 4: HẬU XỬ LÝ (VERIFICATION & REPLACEMENT) ---
-            # Đây là Gatekeeper: Kiểm tra REF cuối cùng. Nếu sai -> Hủy output.
             
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
@@ -559,26 +582,22 @@ QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
             
             final_display_text = ""
 
-            # Check logic thất bại trước
             if "Không tìm thấy thông tin phù hợp" in cleaned_response:
-                final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
+                final_display_text = "Không tìm thấy thông tin phù hợp trong bộ sách này."
             
             elif match:
                 uid = match.group(1)
                 # Gatekeeper check: ID có trong sổ cái không?
                 if uid in citation_registry:
-                    # Loại bỏ tag REF khỏi nội dung gốc
                     content_only = re.sub(pattern_final_ref, '', cleaned_response).strip()
                     
-                    # Tạo HTML nguồn đẹp
-                    source_html = f"<div style='margin-top:10px; text-align:right;'><span class='citation-source'>{citation_registry[uid]}</span></div>"
+                    # HTML nguồn đẹp chuẩn KHKT
+                    source_html = f"<div class='citation-source'>{citation_registry[uid]}</div>"
                     
                     final_display_text = content_only + source_html
                 else:
-                    # Hallucination detected (REF bịa) -> Hủy kết quả
-                    final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có. (Lỗi xác thực nguồn)"
+                    final_display_text = "Không tìm thấy thông tin phù hợp. (Lỗi xác thực nguồn)"
             else:
-                # Không có REF nào được sinh ra -> Vi phạm quy chế -> Hủy kết quả
                 final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
 
             yield final_display_text
@@ -600,16 +619,16 @@ def main():
     UIManager.render_header()
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học."}]
+        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức bộ sách <b>Kết nối tri thức với cuộc sống</b>."}]
 
     groq_client = RAGEngine.load_groq_client()
 
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (LlamaParse + Semantic Chunking)..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Metadata-Driven Check)..."):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
             if st.session_state.retriever_engine:
-                st.toast("✅ Dữ liệu SGK đã sẵn sàng!", icon="📚")
+                st.toast("✅ Dữ liệu SGK KNTT đã sẵn sàng!", icon="📚")
 
     for msg in st.session_state.messages:
         bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
