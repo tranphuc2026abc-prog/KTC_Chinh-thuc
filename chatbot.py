@@ -133,17 +133,18 @@ class UIManager:
                 background: white; border: 1px solid #e9ecef;
                 border-left: 5px solid #00b4d8;
             }
-            /* Style cho Citation để nổi bật nguồn */
+            /* Style cho Citation chuẩn KHKT */
             .citation-source {
-                font-size: 0.85em;
-                color: #d63384; /* Màu hồng đậm */
-                background-color: #f8f9fa;
-                padding: 2px 6px;
-                border-radius: 4px;
-                border: 1px solid #e9ecef;
+                font-size: 0.8em;
+                color: #ffffff; 
+                background-color: #d63384; /* Màu hồng đậm nổi bật */
+                padding: 3px 8px;
+                border-radius: 12px;
                 font-weight: 600;
                 margin-left: 5px;
                 display: inline-block;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+                border: none;
             }
             div.stButton > button {
                 border-radius: 8px; background-color: white; color: #0077b6;
@@ -297,7 +298,7 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 50: return 
             
-            chunk_uid = str(uuid.uuid4())[:8]
+            chunk_uid = str(uuid.uuid4())[:8] # Generate 8-char UID
             
             new_meta = meta.copy()
             new_meta.update({
@@ -308,8 +309,8 @@ class RAGEngine:
                 "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
-            full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
-            chunks.append(Document(page_content=full_content, metadata=new_meta))
+            # Lưu ý: Không nhét metadata vào page_content để tránh nhiễu ngữ nghĩa
+            chunks.append(Document(page_content=content, metadata=new_meta))
 
         for line in lines:
             line_stripped = line.strip()
@@ -444,19 +445,13 @@ class RAGEngine:
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
     
-    # [NEW] Hàm vệ sinh văn bản để xóa ký tự lạ
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật) và làm sạch format.
+        Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật)
         """
-        # Regex bắt tất cả các ký tự CJK phổ biến
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
-        
-        # Nếu gặp từ tiếng Trung, thay thế bằng "từ khóa" (phù hợp ngữ cảnh) hoặc xóa bỏ
-        # Ở đây ta thay bằng "từ khóa" nếu nó là danh từ, hoặc xóa nếu rác
-        # Để an toàn nhất: Thay bằng text tiếng Việt generic hoặc xóa
-        text = cjk_pattern.sub("từ khóa", text) 
+        text = cjk_pattern.sub("", text) 
         return text
 
     @staticmethod
@@ -488,49 +483,52 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: MAPPING REGISTRY (Sổ cái ánh xạ) ---
-        uid_to_citation_text = {}
+        # --- TẦNG 2: BUILDING REGISTRY (SỔ CÁI ÁNH XẠ NGUỒN) ---
+        # Đây là bước quan trọng để đảm bảo tính xác thực. 
+        # Chúng ta tạo map: chunk_uid -> "📖 Tên sách -> Chương -> Bài"
+        
+        citation_registry = {} 
         context_parts = []
 
         for doc in final_docs:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
+            # Xử lý tên hiển thị
             src_raw = doc.metadata.get('source', '')
-            src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
-            chapter = doc.metadata.get('chapter', 'Chương ?')
-            lesson = doc.metadata.get('lesson', 'Bài ?')
+            src_clean = src_raw.replace('.pdf', '').replace('_', ' ').strip()
+            chapter = doc.metadata.get('chapter', 'Chương ?').strip()
+            lesson = doc.metadata.get('lesson', 'Bài ?').strip()
             
-            # Logic hiển thị Citation
-            is_default_chapter = (chapter == "Chương mở đầu")
-            is_default_lesson = (lesson == "Bài mở đầu" or lesson == "Tổng quan chương")
-            
-            if is_default_chapter and is_default_lesson:
+            # Logic rút gọn hiển thị nếu là phần mở đầu
+            if chapter == "Chương mở đầu" and lesson == "Bài mở đầu":
                  doc_type = RAGEngine._detect_doc_type(src_clean)
-                 citation_display = f"📖 {src_clean} ➜ {doc_type}" 
+                 human_readable_source = f"📖 {src_clean} ➜ {doc_type}" 
             else:
-                 citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+                 human_readable_source = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
-            uid_to_citation_text[uid] = citation_display
+            # Lưu vào sổ cái
+            citation_registry[uid] = human_readable_source
             
+            # Đưa vào prompt cho AI
             context_parts.append(
-                f"--- BEGIN DATA ---\nREF_CODE: {uid}\n{doc.page_content}\n--- END DATA ---"
+                f"--- BEGIN CHUNK ---\nREF_CODE: {uid}\nCONTENT: {doc.page_content}\n--- END CHUNK ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - NGHIÊM NGẶT) ---
-        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT].
+        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - NGHIÊM NGẶT TUYỆT ĐỐI) ---
+        # Yêu cầu LLM chỉ trả về mã REF, không được tự bịa text nguồn.
+        
+        system_prompt = f"""Bạn là KTC Chatbot, trợ lý học tập môn Tin học.
+NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT].
 
-CÁC QUY TẮC BẮT BUỘC (VI PHẠM LÀ LỖI HỆ THỐNG):
-1. NGÔN NGỮ: Chỉ dùng Tiếng Việt. Tuyệt đối KHÔNG xuất hiện ký tự Trung/Hàn/Nhật (như 关键词).
-2. TRÍCH DẪN (CITATION):
-   - SAI: x = 1 [ID:abcd], y = 2 [ID:xyzt]. (Tuyệt đối KHÔNG chèn citation vào giữa dòng code hoặc giữa các biến số).
-   - ĐÚNG: x = 1, y = 2. [ID:abcd] (Chỉ được chèn citation ở CUỐI CÂU hoặc CUỐI ĐOẠN văn bản).
-3. CODE PYTHON:
-   - KHÔNG bao giờ chèn [ID:...] vào bên trong khối lệnh (```python ... ```).
-   - Hãy để nguồn trích dẫn ở dòng văn bản giải thích phía trên hoặc phía dưới khối code.
-4. Trả lời ngắn gọn, đúng trọng tâm.
+QUY TẮC TRÍCH DẪN (BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM):
+1. Mọi thông tin lấy từ context PHẢI được xác thực bằng mã tham chiếu ở cuối câu.
+2. Cú pháp DUY NHẤT được chấp nhận: [REF:xxxxxxxx] (trong đó xxxxxxxx là REF_CODE từ context).
+3. TUYỆT ĐỐI KHÔNG được tự viết tên sách hay chương bài ra (Ví dụ: KHÔNG viết "Theo SGK Tin 10..."). Hệ thống sẽ tự động hiển thị dựa trên mã REF.
+4. KHÔNG hiển thị [REF:...] trong khối lệnh Python. Hãy để nó ở dòng chú thích.
+5. Nếu không tìm thấy thông tin để trả lời, hãy nói rõ là không biết.
 
 [CONTEXT]
 {full_context}
@@ -543,33 +541,39 @@ CÁC QUY TẮC BẮT BUỘC (VI PHẠM LÀ LỖI HỆ THỐNG):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                stream=False,
+                stream=False, # Stream = False để kiểm soát toàn bộ output
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=1500
             )
             raw_response = completion.choices[0].message.content
 
-            if "NO_INFO" in raw_response or not raw_response.strip():
-                yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
+            if not raw_response.strip():
+                yield "Hệ thống không thể tạo câu trả lời."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (QUAN TRỌNG) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (VERIFICATION & REPLACEMENT) ---
             
-            # 1. Quét sạch ký tự lạ (Trung/Hàn)
+            # 1. Vệ sinh (xóa ký tự lạ)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # 2. Xử lý hiển thị Citation
-            pattern_broad = r'\[.*[:\s]([a-zA-Z0-9]{8})\s*\]'
+            # 2. Xử lý Citation dựa trên Registry (Sổ cái)
+            # Regex này bắt đúng format [REF:xxxxxxxx] mà prompt yêu cầu
+            pattern_strict = r'\[REF:([a-zA-Z0-9]{8})\]'
             
-            def citation_mapper(match):
+            def citation_replacer(match):
                 uid = match.group(1) 
-                if uid in uid_to_citation_text:
-                    # Thêm khoảng trắng trước citation để không dính chữ
-                    return f" <span class='citation-source'>{uid_to_citation_text[uid]}</span>"
-                return "" 
+                if uid in citation_registry:
+                    # Nếu REF tồn tại trong sổ cái -> Thay bằng HTML đẹp
+                    return f" <span class='citation-source'>{citation_registry[uid]}</span>"
+                else:
+                    # Nếu REF không tồn tại (hallucination) -> Xóa bỏ ngay lập tức
+                    return "" 
 
-            final_response = re.sub(pattern_broad, citation_mapper, cleaned_response)
+            final_response = re.sub(pattern_strict, citation_replacer, cleaned_response)
             
+            # Kiểm tra an toàn: Nếu output ngắn và không có REF nào hợp lệ (trong trường hợp hỏi kiến thức)
+            # (Tạm thời bỏ qua check này để tránh false positive với các câu chào hỏi xã giao)
+
             yield final_response
 
         except Exception as e:
