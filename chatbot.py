@@ -480,13 +480,10 @@ class RAGEngine:
             final_docs = initial_docs[:AppConfig.FINAL_K]
 
         if not final_docs:
-            yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
+            yield "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
             return
 
         # --- TẦNG 2: BUILDING REGISTRY (SỔ CÁI ÁNH XẠ NGUỒN) ---
-        # Đây là bước quan trọng để đảm bảo tính xác thực. 
-        # Chúng ta tạo map: chunk_uid -> "📖 Tên sách -> Chương -> Bài"
-        
         citation_registry = {} 
         context_parts = []
 
@@ -500,35 +497,35 @@ class RAGEngine:
             chapter = doc.metadata.get('chapter', 'Chương ?').strip()
             lesson = doc.metadata.get('lesson', 'Bài ?').strip()
             
-            # Logic rút gọn hiển thị nếu là phần mở đầu
+            # Logic rút gọn hiển thị
             if chapter == "Chương mở đầu" and lesson == "Bài mở đầu":
                  doc_type = RAGEngine._detect_doc_type(src_clean)
                  human_readable_source = f"📖 {src_clean} ➜ {doc_type}" 
             else:
                  human_readable_source = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
             
-            # Lưu vào sổ cái
             citation_registry[uid] = human_readable_source
             
             # Đưa vào prompt cho AI
             context_parts.append(
-                f"--- BEGIN CHUNK ---\nREF_CODE: {uid}\nCONTENT: {doc.page_content}\n--- END CHUNK ---"
+                f"--- BEGIN CHUNK ---\nID: {uid}\nCONTENT: {doc.page_content}\n--- END CHUNK ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - NGHIÊM NGẶT TUYỆT ĐỐI) ---
-        # Yêu cầu LLM chỉ trả về mã REF, không được tự bịa text nguồn.
+        # --- TẦNG 3: PROMPT (NGHIÊM NGẶT - CITATION GATED) ---
+        # Yêu cầu LLM KHÔNG trích dẫn inline, mà chỉ output mã ở cuối cùng.
         
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý học tập môn Tin học.
 NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT].
 
-QUY TẮC TRÍCH DẪN (BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM):
-1. Mọi thông tin lấy từ context PHẢI được xác thực bằng mã tham chiếu ở cuối câu.
-2. Cú pháp DUY NHẤT được chấp nhận: [REF:xxxxxxxx] (trong đó xxxxxxxx là REF_CODE từ context).
-3. TUYỆT ĐỐI KHÔNG được tự viết tên sách hay chương bài ra (Ví dụ: KHÔNG viết "Theo SGK Tin 10..."). Hệ thống sẽ tự động hiển thị dựa trên mã REF.
-4. KHÔNG hiển thị [REF:...] trong khối lệnh Python. Hãy để nó ở dòng chú thích.
-5. Nếu không tìm thấy thông tin để trả lời, hãy nói rõ là không biết.
+QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
+1. Dựa hoàn toàn vào context để trả lời.
+2. TUYỆT ĐỐI KHÔNG ghi nguồn, tên sách hay chương bài trong nội dung câu trả lời.
+3. KHÔNG chèn mã [REF] vào giữa các câu.
+4. Chọn ĐÚNG 1 đoạn thông tin (chunk) quan trọng nhất dùng để tham chiếu.
+5. KẾT THÚC CÂU TRẢ LỜI bằng cú pháp duy nhất: [FINAL_REF:xxxxxxxx] (xxxxxxxx là ID của chunk).
+6. Nếu không tìm thấy thông tin: Hãy trả lời chính xác câu "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
 
 [CONTEXT]
 {full_context}
@@ -541,40 +538,50 @@ QUY TẮC TRÍCH DẪN (BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                stream=False, # Stream = False để kiểm soát toàn bộ output
+                stream=False, 
                 temperature=AppConfig.LLM_TEMPERATURE,
                 max_tokens=1500
             )
-            raw_response = completion.choices[0].message.content
+            raw_response = completion.choices[0].message.content.strip()
 
-            if not raw_response.strip():
+            if not raw_response:
                 yield "Hệ thống không thể tạo câu trả lời."
                 return
 
             # --- TẦNG 4: HẬU XỬ LÝ (VERIFICATION & REPLACEMENT) ---
+            # Đây là Gatekeeper: Kiểm tra REF cuối cùng. Nếu sai -> Hủy output.
             
-            # 1. Vệ sinh (xóa ký tự lạ)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # 2. Xử lý Citation dựa trên Registry (Sổ cái)
-            # Regex này bắt đúng format [REF:xxxxxxxx] mà prompt yêu cầu
-            pattern_strict = r'\[REF:([a-zA-Z0-9]{8})\]'
+            # Regex tìm FINAL_REF ở cuối chuỗi
+            pattern_final_ref = r'\[FINAL_REF:([a-zA-Z0-9]{8})\]'
+            match = re.search(pattern_final_ref, cleaned_response)
             
-            def citation_replacer(match):
-                uid = match.group(1) 
+            final_display_text = ""
+
+            # Check logic thất bại trước
+            if "Không tìm thấy thông tin phù hợp" in cleaned_response:
+                final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
+            
+            elif match:
+                uid = match.group(1)
+                # Gatekeeper check: ID có trong sổ cái không?
                 if uid in citation_registry:
-                    # Nếu REF tồn tại trong sổ cái -> Thay bằng HTML đẹp
-                    return f" <span class='citation-source'>{citation_registry[uid]}</span>"
+                    # Loại bỏ tag REF khỏi nội dung gốc
+                    content_only = re.sub(pattern_final_ref, '', cleaned_response).strip()
+                    
+                    # Tạo HTML nguồn đẹp
+                    source_html = f"<div style='margin-top:10px; text-align:right;'><span class='citation-source'>{citation_registry[uid]}</span></div>"
+                    
+                    final_display_text = content_only + source_html
                 else:
-                    # Nếu REF không tồn tại (hallucination) -> Xóa bỏ ngay lập tức
-                    return "" 
+                    # Hallucination detected (REF bịa) -> Hủy kết quả
+                    final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có. (Lỗi xác thực nguồn)"
+            else:
+                # Không có REF nào được sinh ra -> Vi phạm quy chế -> Hủy kết quả
+                final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
 
-            final_response = re.sub(pattern_strict, citation_replacer, cleaned_response)
-            
-            # Kiểm tra an toàn: Nếu output ngắn và không có REF nào hợp lệ (trong trường hợp hỏi kiến thức)
-            # (Tạm thời bỏ qua check này để tránh false positive với các câu chào hỏi xã giao)
-
-            yield final_response
+            yield final_display_text
 
         except Exception as e:
             yield f"Lỗi xử lý hệ thống: {str(e)}"
