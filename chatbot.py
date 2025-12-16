@@ -219,7 +219,7 @@ class UIManager:
         """, unsafe_allow_html=True)
 
 # ==================================
-# 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
+# 3. LOGIC BACKEND - ADAPTIVE KNOWLEDGE ROUTING (UPDATED)
 # ==================================
 
 class RAGEngine:
@@ -254,25 +254,6 @@ class RAGEngine:
             return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
         except Exception as e:
             return None
-
-    @staticmethod
-    def _detect_doc_type(source_name: str) -> str:
-        name_lower = source_name.lower()
-        if any(k in name_lower for k in ["on thi", "ôn thi"]):
-            return "Tài liệu ôn tập"
-        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
-            return "Tài liệu tham khảo"
-        if any(k in name_lower for k in ["sgk", "tin"]):
-            return "Tài liệu học tập"
-        return "Tài liệu tham khảo"
-
-    @staticmethod
-    def _detect_grade(filename: str) -> str:
-        filename = filename.lower()
-        if "10" in filename: return "10"
-        if "11" in filename: return "11"
-        if "12" in filename: return "12"
-        return "general"
 
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
@@ -398,7 +379,6 @@ class RAGEngine:
             if "ERROR" not in markdown_content and len(markdown_content) > 50:
                  meta = {
                      "source": source_file, 
-                     "grade": RAGEngine._detect_grade(source_file)
                  }
                  file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
                  all_chunks.extend(file_chunks)
@@ -447,43 +427,98 @@ class RAGEngine:
     
     @staticmethod
     def _sanitize_output(text: str) -> str:
-        """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật)
-        """
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text) 
         return text
 
+    # --- ĐÂY LÀ PHẦN CỐT LÕI ĐƯỢC NÂNG CẤP (ADAPTIVE GENERATOR) ---
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
         if not retriever:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
             return
         
-        # --- TẦNG 1: RETRIEVAL ---
+        # --- PHASE 1: TRUY XUẤT (Retrieval) ---
         initial_docs = retriever.invoke(query)
+        
+        # --- PHASE 2: TÍNH ĐIỂM TRỌNG SỐ (ADAPTIVE WEIGHTING) ---
+        # Tự động gán điểm thưởng dựa trên tên file
+        scored_docs = []
+        for doc in initial_docs:
+            src = doc.metadata.get('source', '')
+            
+            # --- LOGIC ĐỊNH TUYẾN TRI THỨC ---
+            priority_score = 0.0
+            
+            # Ưu tiên 1: Sách Giáo Khoa (KNTT)
+            if "KNTT" in src:
+                priority_score = 1.0  
+                
+            # Ưu tiên 2: Sách Giáo Viên (GV)
+            elif "_GV_" in src:
+                priority_score = 0.5  
+            
+            # Ưu tiên 3: Ôn tập (ON THI)
+            elif "ON THI" in src:
+                priority_score = 0.3
+                
+            # Các tài liệu tham khảo khác (PythonCoban, etc.) -> Không cộng điểm
+            else:
+                priority_score = 0.0  
+            
+            scored_docs.append({
+                "doc": doc,
+                "bonus": priority_score
+            })
+            
+        # --- PHASE 3: RERANKING (AI + Rule Base) ---
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
-            if ranker and initial_docs:
+            if ranker and scored_docs:
                 passages = [
-                    {"id": str(i), "text": d.page_content, "meta": d.metadata} 
-                    for i, d in enumerate(initial_docs)
+                    {"id": str(i), "text": item["doc"].page_content, "meta": item["doc"].metadata} 
+                    for i, item in enumerate(scored_docs)
                 ]
                 rerank_req = RerankRequest(query=query, passages=passages)
                 results = ranker.rank(rerank_req)
-                for res in results[:AppConfig.FINAL_K]:
-                    final_docs.append(Document(page_content=res["text"], metadata=res["meta"]))
+                
+                # Lai ghép điểm số: AI Score + Priority Bonus
+                reranked_results = []
+                for res in results:
+                    original_idx = int(res['id'])
+                    bonus = scored_docs[original_idx]['bonus']
+                    ai_score = res['score'] # AI đánh giá độ khớp câu hỏi
+                    
+                    # Công thức "Bẻ lái" AI về phía SGK
+                    # Nếu điểm AI ~ 0.8, Bonus SGK = 1.0 -> Final = 1.2
+                    # Nếu điểm AI ~ 0.9 (PythonCoban), Bonus = 0 -> Final = 0.9
+                    # => SGK thắng
+                    final_score = ai_score + (bonus * 0.4) 
+                    
+                    reranked_results.append({
+                        "result": res,
+                        "final_score": final_score
+                    })
+                
+                # Sắp xếp lại theo điểm tổng
+                reranked_results.sort(key=lambda x: x['final_score'], reverse=True)
+                
+                # Lấy Top K (Đã ưu tiên SGK)
+                top_k = reranked_results[:AppConfig.FINAL_K]
+                final_docs = [Document(page_content=r['result']['text'], metadata=r['result']['meta']) for r in top_k]
             else:
-                final_docs = initial_docs[:AppConfig.FINAL_K]
+                # Fallback: Chỉ sắp xếp theo Bonus nếu Reranker lỗi
+                scored_docs.sort(key=lambda x: x['bonus'], reverse=True)
+                final_docs = [item["doc"] for item in scored_docs][:AppConfig.FINAL_K]
         except Exception:
-            final_docs = initial_docs[:AppConfig.FINAL_K]
+            final_docs = [item["doc"] for item in scored_docs][:AppConfig.FINAL_K]
 
         if not final_docs:
             yield "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
             return
 
-        # --- TẦNG 2: BUILDING REGISTRY (SỔ CÁI ÁNH XẠ NGUỒN) ---
+        # --- PHASE 4: XÂY DỰNG CONTEXT & PROMPT ---
         citation_registry = {} 
         context_parts = []
 
@@ -491,41 +526,39 @@ class RAGEngine:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
-            # Xử lý tên hiển thị
+            # Xử lý hiển thị tên nguồn (Cleanup name)
             src_raw = doc.metadata.get('source', '')
-            src_clean = src_raw.replace('.pdf', '').replace('_', ' ').strip()
-            chapter = doc.metadata.get('chapter', 'Chương ?').strip()
-            lesson = doc.metadata.get('lesson', 'Bài ?').strip()
+            clean_name = src_raw.replace('.pdf', '').replace('_', ' ')
             
-            # Logic rút gọn hiển thị
-            if chapter == "Chương mở đầu" and lesson == "Bài mở đầu":
-                 doc_type = RAGEngine._detect_doc_type(src_clean)
-                 human_readable_source = f"📖 {src_clean} ➜ {doc_type}" 
-            else:
-                 human_readable_source = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+            # Gán nhãn hiển thị (UI Badge) - Tự động hóa
+            badge = "📄"
+            if "KNTT" in src_raw: 
+                badge = "📘 SGK"  # Icon sách xanh cho SGK
+            elif "GV" in src_raw: 
+                badge = "📙 SGV"  # Icon sách cam cho SGV
+            elif "Python" in src_raw: 
+                badge = "🐍 Code" # Icon rắn cho Python
             
-            citation_registry[uid] = human_readable_source
+            # Lấy thông tin bài học
+            lesson = doc.metadata.get('lesson', '').replace('Bài', 'B.').strip()
+            citation_registry[uid] = f"{badge} {clean_name} > {lesson}"
             
-            # Đưa vào prompt cho AI
             context_parts.append(
                 f"--- BEGIN CHUNK ---\nID: {uid}\nCONTENT: {doc.page_content}\n--- END CHUNK ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (NGHIÊM NGẶT - CITATION GATED) ---
-        # Yêu cầu LLM KHÔNG trích dẫn inline, mà chỉ output mã ở cuối cùng.
-        
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý học tập môn Tin học.
+        # Prompt đặc tả cho Gemini - Ép tuân thủ ưu tiên
+        system_prompt = f"""Bạn là KTC Chatbot - Trợ lý học tập chuẩn SGK.
 NHIỆM VỤ: Trả lời câu hỏi dựa trên [CONTEXT].
 
-QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
-1. Dựa hoàn toàn vào context để trả lời.
-2. TUYỆT ĐỐI KHÔNG ghi nguồn, tên sách hay chương bài trong nội dung câu trả lời.
-3. KHÔNG chèn mã [REF] vào giữa các câu.
-4. Chọn ĐÚNG 1 đoạn thông tin (chunk) quan trọng nhất dùng để tham chiếu.
-5. KẾT THÚC CÂU TRẢ LỜI bằng cú pháp duy nhất: [FINAL_REF:xxxxxxxx] (xxxxxxxx là ID của chunk).
-6. Nếu không tìm thấy thông tin: Hãy trả lời chính xác câu "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
+QUY TẮC BẮT BUỘC (QUAN TRỌNG):
+1. ƯU TIÊN SỐ 1: Thông tin từ các chunk có tên chứa 'KNTT' hoặc 'SGK'.
+2. CHỈ sử dụng thông tin từ tài liệu khác (như PythonCoban) nến SGK không đề cập.
+3. Nếu [CONTEXT] có mâu thuẫn giữa SGK và tài liệu khác, PHẢI CHỌN SGK.
+4. Cuối câu trả lời, BẮT BUỘC ghi mã tham chiếu duy nhất: [FINAL_REF:xxxxxxxx].
+5. Chọn ID của chunk có chứa thông tin chính xác nhất (ưu tiên SGK) để làm tham chiếu.
 
 [CONTEXT]
 {full_context}
@@ -534,57 +567,33 @@ QUY TẮC BẮT BUỘC (CITATION-GATED GENERATION):
         try:
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query}
-                ],
-                stream=False, 
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
                 temperature=AppConfig.LLM_TEMPERATURE,
-                max_tokens=1500
+                stream=False
             )
             raw_response = completion.choices[0].message.content.strip()
-
-            if not raw_response:
-                yield "Hệ thống không thể tạo câu trả lời."
-                return
-
-            # --- TẦNG 4: HẬU XỬ LÝ (VERIFICATION & REPLACEMENT) ---
-            # Đây là Gatekeeper: Kiểm tra REF cuối cùng. Nếu sai -> Hủy output.
             
+            # Hậu xử lý (Hiển thị nguồn)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
-            
-            # Regex tìm FINAL_REF ở cuối chuỗi
             pattern_final_ref = r'\[FINAL_REF:([a-zA-Z0-9]{8})\]'
             match = re.search(pattern_final_ref, cleaned_response)
             
-            final_display_text = ""
-
-            # Check logic thất bại trước
-            if "Không tìm thấy thông tin phù hợp" in cleaned_response:
-                final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
-            
-            elif match:
+            if match and match.group(1) in citation_registry:
                 uid = match.group(1)
-                # Gatekeeper check: ID có trong sổ cái không?
-                if uid in citation_registry:
-                    # Loại bỏ tag REF khỏi nội dung gốc
-                    content_only = re.sub(pattern_final_ref, '', cleaned_response).strip()
-                    
-                    # Tạo HTML nguồn đẹp
-                    source_html = f"<div style='margin-top:10px; text-align:right;'><span class='citation-source'>{citation_registry[uid]}</span></div>"
-                    
-                    final_display_text = content_only + source_html
-                else:
-                    # Hallucination detected (REF bịa) -> Hủy kết quả
-                    final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có. (Lỗi xác thực nguồn)"
+                content = re.sub(pattern_final_ref, '', cleaned_response).strip()
+                # Render HTML nguồn đẹp
+                source_html = f"<div style='margin-top:10px; text-align:right;'><span class='citation-source'>{citation_registry[uid]}</span></div>"
+                yield content + source_html
             else:
-                # Không có REF nào được sinh ra -> Vi phạm quy chế -> Hủy kết quả
-                final_display_text = "Không tìm thấy thông tin phù hợp trong tài liệu hiện có."
-
-            yield final_display_text
+                # Fallback mềm: Vẫn hiện nội dung nhưng cảnh báo nhẹ
+                clean_text = re.sub(pattern_final_ref, '', cleaned_response).strip()
+                if len(clean_text) > 10:
+                    yield clean_text + "\n\n*(Nguồn: Tổng hợp từ dữ liệu học tập)*"
+                else:
+                    yield "Xin lỗi, tôi chưa tìm thấy thông tin chính xác trong SGK."
 
         except Exception as e:
-            yield f"Lỗi xử lý hệ thống: {str(e)}"
+            yield f"Lỗi hệ thống: {str(e)}"
 
 # ===================
 # 4. MAIN APPLICATION
