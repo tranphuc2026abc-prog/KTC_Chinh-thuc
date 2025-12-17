@@ -13,9 +13,9 @@ from typing import List, Tuple, Optional, Dict, Generator
 # --- Imports với xử lý lỗi ---
 try:
     import nest_asyncio
-    nest_asyncio.apply() # Bắt buộc cho LlamaParse chạy trong Streamlit
-    from llama_parse import LlamaParse 
-    
+    nest_asyncio.apply()  # Bắt buộc cho LlamaParse chạy trong Streamlit
+    from llama_parse import LlamaParse
+
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_community.retrievers import BM25Retriever
@@ -31,7 +31,7 @@ except ImportError as e:
     IMPORT_ERROR = str(e)
 
 # ==============================
-# 1. CẤU HÌNH HỆ THỐNG (CONFIG) 
+# 1. CẤU HÌNH HỆ THỐNG (CONFIG)
 # ==============================
 
 st.set_page_config(
@@ -40,6 +40,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 
 class AppConfig:
     # Model Config
@@ -52,24 +53,25 @@ class AppConfig:
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
     RERANK_CACHE = "./opt"
-    PROCESSED_MD_DIR = "PROCESSED_MD" 
+    PROCESSED_MD_DIR = "PROCESSED_MD"
 
     # Assets
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
 
     # RAG Parameters
-    RETRIEVAL_K = 30       
-    FINAL_K = 7            # Tăng nhẹ để đảm bảo đủ ngữ cảnh
-    
-    # Hybrid Search Weights
-    BM25_WEIGHT = 0.4      
-    FAISS_WEIGHT = 0.6     
+    RETRIEVAL_K = 30
+    FINAL_K = 7  # Tăng nhẹ để đảm bảo đủ ngữ cảnh
 
-    LLM_TEMPERATURE = 0.0 # BẮT BUỘC = 0.0 để triệt tiêu sáng tạo ảo giác
+    # Hybrid Search Weights
+    BM25_WEIGHT = 0.4
+    FAISS_WEIGHT = 0.6
+
+    LLM_TEMPERATURE = 0.0  # BẮT BUỘC = 0.0 để triệt tiêu sáng tạo ảo giác
+
 
 # ===============================
-# 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
+# 2. XỬ LÝ GIAO DIỆN (UI MANAGER )
 # ===============================
 
 class UIManager:
@@ -190,7 +192,7 @@ class UIManager:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
+
             st.markdown("### ⚙️ Tiện ích")
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
@@ -218,6 +220,7 @@ class UIManager:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
 
 # ==================================
 # 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
@@ -260,11 +263,11 @@ class RAGEngine:
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
         lines = text.split('\n')
         chunks = []
-        
+
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
-        
+
         buffer = []
 
         # --- REGEX PATTERNS CHO SGK VIỆT NAM ---
@@ -276,58 +279,61 @@ class RAGEngine:
             return text.replace('#', '').replace('*', '').strip()
 
         def commit_chunk(buf, meta):
-            if not buf: return
+            if not buf:
+                return
             content = "\n".join(buf).strip()
-            if len(content) < 50: return 
-            
+            if len(content) < 50:
+                return
+
             # DETERMINISTIC CHUNK UID: SHA256 trên nội dung + nguồn + chapter + lesson + section
-            hash_input = (meta.get("source","") + "|" + current_chapter + "|" + current_lesson + "|" + current_section + "|" + content).encode('utf-8')
+            hash_input = (meta.get("source", "") + "|" + current_chapter + "|" + current_lesson + "|" + current_section + "|" + content).encode('utf-8')
             chunk_hash = hashlib.sha256(hash_input).hexdigest()[:12]  # 12 hex chars đủ phân biệt
-                        
+
             new_meta = meta.copy()
             new_meta.update({
                 "chunk_uid": chunk_hash,
                 "chapter": current_chapter,
                 "lesson": current_lesson,
                 "section": current_section,
-                "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
+                "context_str": f"{current_chapter} > {current_lesson} > {current_section}"
             })
-            
+
             chunks.append(Document(page_content=content, metadata=new_meta))
 
         for line in lines:
             line_stripped = line.strip()
-            if not line_stripped: continue
-            
+            if not line_stripped:
+                continue
+
             if p_chapter.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
                 current_lesson = "Tổng quan chương"
                 current_section = "Giới thiệu"
-            
+
             elif p_lesson.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_lesson = clean_header(line_stripped)
                 current_section = "Tổng quan bài"
-                
+
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_section = clean_header(line_stripped)
-                
-            elif line_stripped.startswith("# "): 
+
+            elif line_stripped.startswith("# "):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
-            elif line_stripped.startswith("## "): 
+            elif line_stripped.startswith("## "):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_lesson = clean_header(line_stripped)
             else:
                 buffer.append(line)
-        
+
         commit_chunk(buffer, source_meta)
         return chunks
 
@@ -336,11 +342,11 @@ class RAGEngine:
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
         file_name = os.path.basename(file_path)
         md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
-        
+
         if os.path.exists(md_file_path):
             with open(md_file_path, "r", encoding="utf-8") as f:
                 return f.read()
-        
+
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
         if not llama_api_key:
             return "ERROR: Missing LLAMA_CLOUD_API_KEY"
@@ -355,10 +361,10 @@ class RAGEngine:
             )
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
-            
+
             with open(md_file_path, "w", encoding="utf-8") as f:
                 f.write(markdown_text)
-            
+
             return markdown_text
         except Exception as e:
             return f"Error parsing {file_name}: {str(e)}"
@@ -367,7 +373,7 @@ class RAGEngine:
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
         if not os.path.exists(pdf_dir):
             return []
-        
+
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
         all_chunks: List[Document] = []
         status_text = st.empty()
@@ -375,37 +381,39 @@ class RAGEngine:
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
             status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
-            
+
             markdown_content = RAGEngine._parse_pdf_with_llama(file_path)
-            
+
             if "ERROR" not in markdown_content and len(markdown_content) > 50:
-                 meta = {
-                     "source": source_file, 
-                 }
-                 file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
-                 all_chunks.extend(file_chunks)
+                meta = {
+                    "source": source_file,
+                }
+                file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
+                all_chunks.extend(file_chunks)
             else:
-                pass 
-                
+                pass
+
         status_text.empty()
         return all_chunks
 
     @staticmethod
     def build_hybrid_retriever(embeddings):
-        if not embeddings: return None
+        if not embeddings:
+            return None
 
         vector_db = None
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
-            except Exception: pass
+            except Exception:
+                pass
 
         if not vector_db:
             chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
             if not chunk_docs:
                 st.error(f"Không tìm thấy tài liệu hoặc lỗi xử lý trong {AppConfig.PDF_DIR}")
                 return None
-            
+
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
             vector_db.save_local(AppConfig.VECTOR_DB_PATH)
 
@@ -426,11 +434,11 @@ class RAGEngine:
             return ensemble_retriever
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
-    
+
     @staticmethod
     def _sanitize_output(text: str) -> str:
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
-        text = cjk_pattern.sub("", text) 
+        text = cjk_pattern.sub("", text)
         return text
 
     # =========================================================================
@@ -441,41 +449,44 @@ class RAGEngine:
         if not retriever:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
             return
-        
+
         # --- 1. STRICT RETRIEVAL & RERANK ---
         initial_docs = retriever.invoke(query)
-        
+
         # Định tuyến ưu tiên: SGK > SGV > Tài liệu khác
         scored_docs = []
         for doc in initial_docs:
             src = doc.metadata.get('source', '')
             bonus = 0.0
-            if "KNTT" in src: bonus = 2.0  # Ưu tiên cực cao cho SGK KNTT
-            elif "_GV_" in src: bonus = 0.5
-            elif "ON THI" in src: bonus = 0.2
-            
+            if "KNTT" in src:
+                bonus = 2.0  # Ưu tiên cực cao cho SGK KNTT
+            elif "_GV_" in src:
+                bonus = 0.5
+            elif "ON THI" in src:
+                bonus = 0.2
+
             scored_docs.append({"doc": doc, "bonus": bonus})
-            
+
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
             if ranker and scored_docs:
                 passages = [
-                    {"id": str(i), "text": item["doc"].page_content, "meta": item["doc"].metadata} 
+                    {"id": str(i), "text": item["doc"].page_content, "meta": item["doc"].metadata}
                     for i, item in enumerate(scored_docs)
                 ]
                 rerank_req = RerankRequest(query=query, passages=passages)
                 results = ranker.rank(rerank_req)
-                
+
                 final_results_with_score = []
                 for res in results:
                     original_idx = int(res['id'])
                     bonus = scored_docs[original_idx]['bonus']
                     ai_score = res['score']
                     # Công thức trọng số: AI Score + Bonus SGK
-                    total_score = ai_score + (bonus * 0.3) 
+                    total_score = ai_score + (bonus * 0.3)
                     final_results_with_score.append((res, total_score))
-                
+
                 final_results_with_score.sort(key=lambda x: x[1], reverse=True)
                 top_k = final_results_with_score[:AppConfig.FINAL_K]
                 final_docs = [Document(page_content=r[0]['text'], metadata=r[0]['meta']) for r in top_k]
@@ -490,22 +501,23 @@ class RAGEngine:
             return
 
         # --- 2. XÂY DỰNG REGISTRY NGUỒN (KIỂM SOÁT METADATA) ---
-        valid_uids = {} # map uid -> display string "(Nguồn: <Tên SGK> – <Chương> – <Bài>)"
+        valid_uids = {}  # map uid -> display string "(Nguồn: <Tên SGK> – <Chương> – <Bài>)"
         context_parts = []
-        
+
         for doc in final_docs:
             uid = doc.metadata.get('chunk_uid')
-            if not uid: continue
-            
+            if not uid:
+                continue
+
             src_raw = doc.metadata.get('source', '')
             clean_name = src_raw.replace('.pdf', '').replace('_', ' ').strip()
             chapter = doc.metadata.get('chapter', '').strip() or "Chương"
-            lesson = doc.metadata.get('lesson', '').strip() or doc.metadata.get('section','').strip() or "Bài"
-            
+            lesson = doc.metadata.get('lesson', '').strip() or doc.metadata.get('section', '').strip() or "Bài"
+
             # Lưu vào registry để validate sau này
             display_label = f"(Nguồn: {clean_name} – {chapter} – {lesson})"
             valid_uids[uid] = display_label
-            
+
             # Context format chặt chẽ để LLM nhìn thấy ID
             context_parts.append(
                 f"<chunk id='{uid}'>\n{doc.page_content}\n</chunk>"
@@ -527,16 +539,16 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
 DỮ LIỆU CONTEXT:
 {full_context}
 """
-        
+
         try:
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-                temperature=0.0, # Deterministic - Không sáng tạo
+                temperature=0.0,  # Deterministic - Không sáng tạo
                 stream=False
             )
             raw_response = completion.choices[0].message.content.strip()
-            
+
             if "NO_INFO" in raw_response:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
@@ -544,7 +556,7 @@ DỮ LIỆU CONTEXT:
             # --- 4. HẬU KIỂM NGHIÊM NGẶT (AUDIT LAYER) ---
             processed_response = raw_response
 
-            # Regex tìm tất cả [ID:xxxxxxxx]
+            # Regex tìm tất cả [ID:xxxxxxxx] (hex chars)
             pattern = r'
 
 \[ID:([a-fA-F0-9]+)\]
@@ -568,7 +580,6 @@ DỮ LIỆU CONTEXT:
                 sentences = processed_response.split('\n')
 
             for sent in sentences:
-                # Bỏ khoảng trắng
                 s = sent.strip()
                 # Nếu câu rỗng hoặc chỉ chứa ký tự không chữ thì bỏ qua
                 if not re.search(r'[A-Za-zÀ-ỹ0-9]', s):
@@ -581,7 +592,6 @@ DỮ LIỆU CONTEXT:
                     return
 
             # 4.c Nếu mọi kiểm tra OK -> thay thế mỗi [ID:...] bằng display_label (không lộ chunk_uid)
-            # Duyệt từ trái sang phải và thay thế
             def replace_id(match):
                 uid_found = match.group(1)
                 return valid_uids.get(uid_found, "")
@@ -591,9 +601,10 @@ DỮ LIỆU CONTEXT:
             # Trả về kết quả đã map (không thêm cảnh báo hay text phụ)
             yield final_display
 
-        except Exception as e:
+        except Exception:
             # Không tiết lộ lỗi nội bộ, trả về chuỗi hủy theo quy tắc nếu là lỗi liên quan kiểm chứng
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
+
 
 # ===================
 # 4. MAIN APPLICATION
@@ -624,10 +635,10 @@ def main():
         bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
         avatar = "🧑‍🎓" if msg["role"] == "user" else bot_avatar
         with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"], unsafe_allow_html=True) 
+            st.markdown(msg["content"], unsafe_allow_html=True)
 
     user_input = st.chat_input("Nhập câu hỏi học tập...")
-    
+
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user", avatar="🧑‍🎓"):
@@ -635,7 +646,7 @@ def main():
 
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
-            
+
             response_gen = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
@@ -646,10 +657,11 @@ def main():
             for chunk in response_gen:
                 full_response += chunk
                 response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-            
+
             response_placeholder.markdown(full_response, unsafe_allow_html=True)
 
             st.session_state.messages.append({"role": "assistant", "content": full_response})
+
 
 if __name__ == "__main__":
     main()
