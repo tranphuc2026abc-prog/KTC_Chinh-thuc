@@ -8,7 +8,7 @@ import re
 import uuid
 import hashlib
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Generator
+from typing import List, Generator
 
 # --- Imports với xử lý lỗi ---
 try:
@@ -519,26 +519,26 @@ class RAGEngine:
             valid_uids[uid] = display_label
 
             # Context format chặt chẽ để LLM nhìn thấy ID
+            # Note: use single quotes inside chunk tag to avoid interfering with surrounding strings
             context_parts.append(
-                f"<chunk id='{uid}'>\n{doc.page_content}\n</chunk>"
+                "<chunk id='" + uid + "'>\n" + doc.page_content + "\n</chunk>"
             )
 
         full_context = "\n".join(context_parts)
 
         # --- 3. PROMPT KỸ THUẬT NGHIÊM NGẶT (STRICT PROMPT) ---
-        system_prompt = f"""Bạn là Trợ lý AI giáo dục chuẩn KHKT. Nhiệm vụ: Trả lời câu hỏi CHỈ DỰA TRÊN các chunk dữ liệu được cung cấp.
-
-QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
-1. KHÔNG BỊA ĐẶT: Nếu thông tin không có trong context, trả lời "NO_INFO".
-2. TRÍCH DẪN NGAY LẬP TỨC: Mỗi câu hoặc mỗi ý kiến kiến thức phải kết thúc bằng đúng một ID chunk.
-   - **Chỉ** dùng định dạng: [ID:<chunk_uid>]
-   - **Không** dùng tên sách, ngoặc khác, hoặc bất kỳ dạng citation nào khác.
-3. KHÔNG GỘP ID: Mỗi ý chỉ được phép một ID.
-4. ƯU TIÊN SGK: Nếu có mâu thuẫn, lấy thông tin từ chunk có nguồn SGK.
-
-DỮ LIỆU CONTEXT:
-{full_context}
-"""
+        # Build prompt via concatenation to avoid accidental unterminated string issues
+        system_prompt = (
+            "Bạn là Trợ lý AI giáo dục chuẩn KHKT. Nhiệm vụ: Trả lời câu hỏi CHỈ DỰA TRÊN các chunk dữ liệu được cung cấp.\n\n"
+            "QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):\n"
+            "1. KHÔNG BỊA ĐẶT: Nếu thông tin không có trong context, trả lời \"NO_INFO\".\n"
+            "2. TRÍCH DẪN NGAY LẬP TỨC: Mỗi câu hoặc mỗi ý kiến kiến thức phải kết thúc bằng đúng một ID chunk.\n"
+            "   - Chỉ dùng định dạng: [ID:<chunk_uid>]\n"
+            "   - Không dùng tên sách, ngoặc khác, hoặc bất kỳ dạng citation nào khác.\n"
+            "3. KHÔNG GỘP ID: Mỗi ý chỉ được phép một ID.\n"
+            "4. ƯU TIÊN SGK: Nếu có mâu thuẫn, lấy thông tin từ chunk có nguồn SGK.\n\n"
+            "DỮ LIỆU CONTEXT:\n"
+        ) + full_context
 
         try:
             completion = client.chat.completions.create(
@@ -549,6 +549,7 @@ DỮ LIỆU CONTEXT:
             )
             raw_response = completion.choices[0].message.content.strip()
 
+            # If LLM explicitly signals no info
             if "NO_INFO" in raw_response:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
@@ -557,11 +558,12 @@ DỮ LIỆU CONTEXT:
             processed_response = raw_response
 
             # Regex tìm tất cả [ID:xxxxxxxx] (hex chars)
-            pattern = r'
+            # Use double backslashes in normal string literal? raw string is fine here.
+            pattern = r"
 
 \[ID:([a-fA-F0-9]+)\]
 
-'
+"
             matches = list(re.finditer(pattern, processed_response))
             cited_ids = [m.group(1) for m in matches]
 
