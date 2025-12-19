@@ -232,71 +232,22 @@ class UIManager:
 # 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
 # ==================================
 
-class RAGEngine:
-    @staticmethod
-    @st.cache_resource(show_spinner=False)
-    def load_groq_client():
-        try:
-            api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
-            if not api_key:
-                return None
-            return Groq(api_key=api_key)
-        except Exception:
-            return None
-
-    @staticmethod
-    @st.cache_resource(show_spinner=False)
-    def load_embedding_model():
-        try:
-            return HuggingFaceEmbeddings(
-                model_name=AppConfig.EMBEDDING_MODEL,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-        except Exception as e:
-            st.error(f"Lỗi tải Embedding: {e}")
-            return None
-
-    @staticmethod
-    @st.cache_resource(show_spinner=False)
-    def load_reranker():
-        try:
-            return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
-        except Exception as e:
-            return None
-
-    @staticmethod
-    def _detect_doc_type(source_name: str) -> str:
-        name_lower = source_name.lower()
-        if any(k in name_lower for k in ["on thi", "ôn thi"]):
-            return "Tài liệu ôn tập"
-        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
-            return "Tài liệu tham khảo"
-        if any(k in name_lower for k in ["sgk", "tin"]):
-            return "Tài liệu học tập"
-        return "Tài liệu tham khảo"
-
-    @staticmethod
-    def _detect_grade(filename: str) -> str:
-        filename = filename.lower()
-        if "10" in filename: return "10"
-        if "11" in filename: return "11"
-        if "12" in filename: return "12"
-        return "general"
-
-    @staticmethod
+@staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
         lines = text.split('\n')
         chunks = []
         
-        # Mặc định ban đầu
+        # [KHKT STANDARD] Danh sách các định danh MẶC ĐỊNH/KHÔNG HỢP LỆ cần loại bỏ
+        INVALID_MARKERS = {"Chương mở đầu", "Bài mở đầu", "Tổng quan chương", "", "None"}
+        
+        # Khởi tạo mặc định (sẽ bị filter nếu không thay đổi)
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
         
         buffer = []
 
-        # --- REGEX PATTERNS CHO SGK VIỆT NAM ---
+        # --- REGEX PATTERNS (GIỮ NGUYÊN) ---
         p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
@@ -309,6 +260,16 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 50: return 
             
+            # --- [LOGIC MỚI] BỘ LỌC ĐẦU VÀO NGHIÊM NGẶT ---
+            is_valid_chapter = current_chapter not in INVALID_MARKERS
+            is_valid_lesson = current_lesson not in INVALID_MARKERS
+
+            # ĐIỀU KIỆN TIÊN QUYẾT: 
+            # Chunk phải thuộc ít nhất 1 Chương Cụ thể HOẶC 1 Bài Cụ thể.
+            # Nếu cả Chapter và Lesson đều là mặc định/rỗng -> Hủy Chunk này (Không đưa vào DB).
+            if not (is_valid_chapter or is_valid_lesson):
+                return 
+
             chunk_uid = str(uuid.uuid4())[:8]
             
             new_meta = meta.copy()
@@ -331,7 +292,8 @@ class RAGEngine:
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
-                current_lesson = "Tổng quan chương"
+                # Khi vào chương mới, reset bài về trạng thái không hợp lệ để tránh "nhảy cóc" metadata cũ
+                current_lesson = "Tổng quan chương" 
                 current_section = "Giới thiệu"
             
             elif p_lesson.match(line_stripped):
@@ -349,6 +311,7 @@ class RAGEngine:
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
+                current_lesson = "Tổng quan chương" # Reset lesson
             elif line_stripped.startswith("## "): 
                 commit_chunk(buffer, source_meta)
                 buffer = []
