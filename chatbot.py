@@ -6,14 +6,14 @@ import shutil
 import pickle
 import re
 import uuid
-import unicodedata # <--- QUAN TRỌNG: Thư viện xử lý lỗi font
+import unicodedata 
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
 
 # --- Imports với xử lý lỗi ---
 try:
     import nest_asyncio
-    nest_asyncio.apply() # Bắt buộc cho LlamaParse chạy trong Streamlit
+    nest_asyncio.apply() 
     from llama_parse import LlamaParse 
     
     from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -66,7 +66,7 @@ class AppConfig:
     BM25_WEIGHT = 0.4      
     FAISS_WEIGHT = 0.6     
 
-    LLM_TEMPERATURE = 0.0 # Deterministic output for Science
+    LLM_TEMPERATURE = 0.0 
 
 # ===============================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
@@ -145,7 +145,7 @@ class UIManager:
             }
             .citation-header {
                 font-weight: 700;
-                color: #d63384; /* Màu hồng đậm đặc trưng */
+                color: #d63384; 
                 margin-bottom: 5px;
                 display: flex;
                 align-items: center;
@@ -270,14 +270,8 @@ class RAGEngine:
 
     @staticmethod
     def _detect_doc_type(source_name: str) -> str:
-        name_lower = source_name.lower()
-        if any(k in name_lower for k in ["on thi", "ôn thi"]):
-            return "Tài liệu ôn tập"
-        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
-            return "Tài liệu tham khảo"
-        if any(k in name_lower for k in ["sgk", "tin"]):
-            return "Tài liệu học tập"
-        return "Tài liệu tham khảo"
+        # Giữ logic detect đơn giản, quan trọng là cấu trúc bên trong
+        return "SGK Tin học KNTT"
 
     @staticmethod
     def _detect_grade(filename: str) -> str:
@@ -287,109 +281,100 @@ class RAGEngine:
         if "12" in filename: return "12"
         return "general"
 
-    # --- [BẢN SỬA LỖI FINAL] XỬ LÝ CHUNK & REGEX ---
+    # --- [MODIFIED] XỬ LÝ CHUNK THEO CẤU TRÚC KNTT (TOPIC -> LESSON) ---
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        # 1. CLEANING: Chuẩn hóa Unicode + Xóa ký tự tàng hình (\xa0, \u200b)
+        # FIX RAG STRUCTURE: SOURCE–TOPIC–LESSON
+        
+        # 1. CLEANING
         text = unicodedata.normalize('NFC', text)
         text = text.replace('\xa0', ' ').replace('\u200b', '')
         
         lines = text.split('\n')
         chunks = []
         
-        INVALID_MARKERS = {"Chương mở đầu", "Bài mở đầu", "Tổng quan chương", "", "None"}
-        
-        current_chapter = "Chương mở đầu"
-        current_lesson = "Bài mở đầu"
+        # 2. STATE TRACKING (Khởi tạo là None để lọc nghiêm ngặt)
+        current_topic = None   # Thay cho Chapter cũ
+        current_lesson = None  # Thay cho Lesson cũ
         current_section = "Nội dung"
         
         buffer = []
 
-        # 2. REGEX "QUÉT TRIỆT ĐỂ" (KHÔNG DÙNG ^ ĐỂ BẮT ĐẦU DÒNG)
-        # Tìm chữ "Chủ đề" hoặc "Chương" ở bất cứ đâu, miễn là phía trước có dấu phân cách
-        # Bắt: "## Chủ đề 1", "**Chủ đề A**", "Chương I."
-        p_chapter = re.compile(r'(?:^|[\#\*\s\.\-\_]+)(CHƯƠNG|Chương|CHỦ\s*ĐỀ|Chủ\s*đề)\s+([IVX0-9A-Z]+)', re.IGNORECASE)
+        # 3. REGEX ĐẶC THÙ CHO SGK KNTT
+        # Bắt "Chủ đề 1", "Chủ đề A", "Chủ đề F: Giải quyết vấn đề..."
+        # Regex này bắt buộc có chữ "Chủ đề" và theo sau là ID (số hoặc chữ)
+        p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
         
-        # Bắt: "## Bài 1", "BÀI 01", "**Bài 3**"
-        p_lesson = re.compile(r'(?:^|[\#\*\s\.\-\_]+)(BÀI|Bài)\s+([0-9]+)', re.IGNORECASE)
+        # Bắt "Bài 1", "Bài 10", "Bài 18"
+        p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
         
-        # Bắt mục con: "1.", "a)", "###"
+        # Bắt mục con
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
-
-        def clean_header(text):
-            return text.replace('#', '').replace('*', '').strip()
 
         def commit_chunk(buf, meta):
             if not buf: return
             content = "\n".join(buf).strip()
-            if len(content) < 30: return # Giảm giới hạn ký tự xuống 30 để không bỏ sót đoạn ngắn
+            if len(content) < 30: return 
             
-            # --- STRICT FILTER ---
-            is_valid_chapter = current_chapter not in INVALID_MARKERS
-            is_valid_lesson = current_lesson not in INVALID_MARKERS
-
-            # Nếu không tìm thấy bất kỳ ID nào -> Bỏ qua
-            if not (is_valid_chapter or is_valid_lesson):
+            # FIX RAG STRUCTURE: STRICT FILTER
+            # Chỉ lưu chunk nếu ĐÃ xác định được cả Chủ đề VÀ Bài
+            if not current_topic or not current_lesson:
                 return 
 
             chunk_uid = str(uuid.uuid4())[:8]
             new_meta = meta.copy()
             new_meta.update({
                 "chunk_uid": chunk_uid,
-                "chapter": current_chapter,
+                "chapter": current_topic,  # Map Topic vào key 'chapter' để tương thích logic hiển thị cũ
                 "lesson": current_lesson,
                 "section": current_section,
-                "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
+                "context_str": f"{current_topic} > {current_lesson} > {current_section}" 
             })
             
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
-        # --- DEBUG LOG ---
-        print(f"\n--- ĐANG QUÉT FILE: {source_meta['source']} ---")
+        # --- QUÉT FILE ---
+        print(f"\n--- ĐANG QUÉT KNTT: {source_meta['source']} ---")
 
         for line in lines:
             line_stripped = line.strip()
             if not line_stripped: continue
             
-            # Quét tìm CHỦ ĐỀ / CHƯƠNG (Dùng search thay vì match để quét toàn dòng)
-            match_chap = p_chapter.search(line_stripped)
-            if match_chap:
+            # 4. LOGIC PHÁT HIỆN CHỦ ĐỀ (TOPIC)
+            match_topic = p_topic.search(line_stripped)
+            if match_topic:
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 
-                prefix = match_chap.group(1).title() # "Chủ Đề"
-                suffix = match_chap.group(2)         # "A"
-                current_chapter = f"{prefix} {suffix}"
+                # Format lại đẹp: "Chủ đề 1: Tiêu đề..."
+                topic_id = match_topic.group(2).strip()
+                topic_text = match_topic.group(3).strip(" :.-")
+                current_topic = f"Chủ đề {topic_id} {topic_text}".strip()
                 
-                current_lesson = "Tổng quan chương"
-                current_section = "Giới thiệu"
-                print(f"✅ [DETECTED] {current_chapter}") # In ra terminal
+                # Khi sang Chủ đề mới, Bài cũ không còn hiệu lực -> Reset Lesson
+                current_lesson = None 
+                current_section = "Giới thiệu chủ đề"
+                print(f"✅ [TOPIC] {current_topic}")
             
-            # Quét tìm BÀI
+            # 5. LOGIC PHÁT HIỆN BÀI (LESSON)
             elif p_lesson.search(line_stripped):
-                match_less = p_lesson.search(line_stripped)
+                match_lesson = p_lesson.search(line_stripped)
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 
-                current_lesson = f"Bài {match_less.group(2)}"
+                lesson_id = match_lesson.group(2).strip()
+                lesson_text = match_lesson.group(3).strip(" :.-")
+                current_lesson = f"Bài {lesson_id} {lesson_text}".strip()
+                
                 current_section = "Tổng quan bài"
-                print(f"   👉 [DETECTED] {current_lesson}") # In ra terminal
+                print(f"   👉 [LESSON] {current_lesson}")
                 
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_section = clean_header(line_stripped)
+                current_section = line_stripped.replace('#','').strip()
                 
-            elif line_stripped.startswith("# "): 
-                commit_chunk(buffer, source_meta)
-                buffer = []
-                current_chapter = clean_header(line_stripped)
-                current_lesson = "Tổng quan chương"
-            elif line_stripped.startswith("## "): 
-                commit_chunk(buffer, source_meta)
-                buffer = []
-                current_lesson = clean_header(line_stripped)
             else:
                 buffer.append(line)
         
@@ -416,7 +401,7 @@ class RAGEngine:
                 result_type="markdown",
                 language="vi",
                 verbose=True,
-                parsing_instruction="Đây là tài liệu giáo khoa Tin học. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc chương mục (#, ##, ###)."
+                parsing_instruction="Đây là tài liệu giáo khoa Tin học KNTT. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc Chủ đề (#), Bài (##)."
             )
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
@@ -495,23 +480,15 @@ class RAGEngine:
     
     @staticmethod
     def _sanitize_output(text: str) -> str:
-        """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo, 
-        bao gồm cả lỗi Instruction Leakage ("Hệ thống tự động...").
-        """
-        # 1. Loại bỏ tiếng Trung/Hàn/Nhật
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text)
         
-        # 2. [CHỈNH SỬA CITATION] Cắt bỏ các ID/Citation do LLM tự bịa
         hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
         text = hallucination_pattern.sub("", text)
         
-        # 3. [FIX INSTRUCTION LEAKAGE] Loại bỏ dòng LLM "nhại" lại chỉ dẫn hệ thống
         leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
         text = leakage_pattern.sub("", text)
         
-        # 4. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
         lines = text.split('\n')
         cleaned_lines = []
         for line in lines:
@@ -551,7 +528,7 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: MAPPING REGISTRY (Context Builder) ---
+        # --- TẦNG 2: MAPPING REGISTRY ---
         context_parts = []
         for doc in final_docs:
              context_parts.append(
@@ -564,13 +541,11 @@ class RAGEngine:
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
 Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
-QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
+QUY TẮC BẮT BUỘC:
 1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. TUYỆT ĐỐI KHÔNG tự viết nguồn tham khảo dưới mọi hình thức.
-3. TUYỆT ĐỐI KHÔNG tự bịa ID (ví dụ: [ID:...], [1]).
-4. Nếu không có thông tin, hãy nói "Không tìm thấy thông tin trong tài liệu".
-5. Ngôn ngữ: Tiếng Việt sư phạm, trang trọng.
-6. Code Python phải đặt trong ```python ... ```.
+2. KHÔNG tự viết nguồn tham khảo.
+3. KHÔNG bịa đặt ID tài liệu.
+4. Nếu không có thông tin, hãy trả lời trung thực.
 
 [CONTEXT]
 {full_context}
@@ -593,41 +568,29 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - STRICT MODE) ---
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # --- LOGIC CITATION ---
+            # --- FIX RAG STRUCTURE: CITATION LOGIC ---
+            # Lưu ý: 'chapter' ở đây đang chứa thông tin 'Topic' do đã map ở hàm chunking
             unique_sources = set()
             for doc in final_docs:
                 src_raw = doc.metadata.get('source', '')
                 src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
                 
-                chapter = doc.metadata.get('chapter', '').strip()
+                # Ở đây: chapter = Topic (Chủ đề X), lesson = Lesson (Bài Y)
+                topic = doc.metadata.get('chapter', '').strip()
                 lesson = doc.metadata.get('lesson', '').strip()
                 
-                # Loại bỏ rác
-                invalid_chapters = ["Chương mở đầu", "", "None"]
-                invalid_lessons = ["Bài mở đầu", "Tổng quan chương", "", "None"]
-                
-                is_valid_chapter = chapter not in invalid_chapters
-                is_valid_lesson = lesson not in invalid_lessons
-                
-                # Logic hiển thị 3 cấp (Ưu tiên đủ bộ)
-                if is_valid_chapter and is_valid_lesson:
-                    display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+                if topic and lesson:
+                    display_str = f"📖 {src_clean} ➜ {topic} ➜ {lesson}"
                     unique_sources.add(display_str)
-                elif is_valid_chapter:
-                    display_str = f"📖 {src_clean} ➜ {chapter}"
-                    unique_sources.add(display_str)
-                else:
-                    continue 
 
             sorted_sources = sorted(list(unique_sources))
             
             citation_html = ""
             if sorted_sources:
                 citation_html += "\n\n<div class='citation-footer'>"
-                citation_html += "<div class='citation-header'>📚 Nguồn tham khảo xác thực:</div>"
+                citation_html += "<div class='citation-header'>📚 Nguồn tham khảo xác thực (SGK KNTT):</div>"
                 for src in sorted_sources:
                     citation_html += f"<span class='citation-item'>• {src}</span>"
                 citation_html += "</div>"
