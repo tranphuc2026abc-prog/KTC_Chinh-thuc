@@ -459,11 +459,22 @@ class RAGEngine:
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật) và làm sạch format.
+        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo.
         """
+        # 1. Loại bỏ tiếng Trung/Hàn/Nhật
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
-        text = cjk_pattern.sub("", text) # Thay bằng rỗng để sạch hơn
-        return text
+        text = cjk_pattern.sub("", text)
+        
+        # 2. [CHỈNH SỬA CITATION] Cắt bỏ các ID/Citation do LLM tự bịa
+        # Regex này tìm các mẫu như [ID:123], [Nguồn 1], [Trích dẫn:...] và xóa chúng
+        hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
+        text = hallucination_pattern.sub("", text)
+        
+        # 3. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
+        lines = text.split('\n')
+        cleaned_lines = [line for line in lines if not line.strip().lower().startswith(('nguồn:', 'source:', 'trích dẫn:'))]
+        
+        return "\n".join(cleaned_lines).strip()
 
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
@@ -494,26 +505,27 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: MAPPING REGISTRY ---
+        # --- TẦNG 2: MAPPING REGISTRY (Context Builder) ---
         context_parts = []
         for doc in final_docs:
+             # Chỉ lấy nội dung thuần túy, không đưa metadata ID vào context để tránh LLM nhìn thấy
              context_parts.append(
                 f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT) ---
+        # --- TẦNG 3: PROMPT THIẾT QUÂN LUẬT (CITATION STRICT MODE) ---
+        # [CHỈNH SỬA CITATION] System Prompt cấm tuyệt đối LLM trích dẫn
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
 Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
-NGUYÊN TẮC TRẢ LỜI:
-1. Chỉ sử dụng thông tin được cung cấp trong [CONTEXT].
-2. Nếu không có thông tin, hãy nói "Tôi chưa tìm thấy thông tin trong tài liệu".
-3. KHÔNG tự bịa ra thông tin.
-4. Ngôn ngữ: Tiếng Việt 100%, trang trọng, sư phạm.
-5. KHÔNG BAO GIỜ tự viết nguồn tham khảo hay trích dẫn dạng [ID:...] trong câu trả lời. Hệ thống sẽ tự làm việc này.
-6. Trình bày rõ ràng, nếu là code Python phải để trong ```python ... ```.
+QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
+1. Chỉ sử dụng thông tin trong [CONTEXT].
+2. TUYỆT ĐỐI KHÔNG tự viết nguồn tham khảo, KHÔNG tự bịa ID (ví dụ: [ID:...], [1]).
+3. Nhiệm vụ của bạn là tổng hợp nội dung. Phần trích dẫn nguồn sẽ do HỆ THỐNG TỰ ĐỘNG GẮN sau câu trả lời.
+4. Ngôn ngữ: Tiếng Việt sư phạm, trang trọng.
+5. Code Python phải đặt trong ```python ... ```.
 
 [CONTEXT]
 {full_context}
@@ -536,46 +548,37 @@ NGUYÊN TẮC TRẢ LỜI:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - FIX CITATION KHKT) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - STRICT MODE) ---
             
-            # 1. Vệ sinh văn bản
+            # 1. Vệ sinh văn bản (Loại bỏ ID ảo giác nếu có)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # 2. Xây dựng Footer trích dẫn chuẩn KHKT
-            # Logic: Duyệt qua final_docs -> Ưu tiên Chapter/Lesson -> Chỉ fallback khi rỗng
+            # 2. Xây dựng Footer trích dẫn chuẩn KHKT (Deterministic)
+            # [CHỈNH SỬA CITATION] Logic trích dẫn hệ thống, không phụ thuộc LLM
             
             unique_sources = set()
             for doc in final_docs:
                 src_raw = doc.metadata.get('source', '')
                 src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
                 
-                # Lấy metadata chương, bài
                 chapter = doc.metadata.get('chapter', '').strip()
                 lesson = doc.metadata.get('lesson', '').strip()
                 
-                # Kiểm tra xem metadata có phải là giá trị mặc định của hệ thống chunking không
-                # "Chương mở đầu" và "Bài mở đầu" là default value trong _structural_chunking
                 is_default_chapter = (chapter in ["Chương mở đầu", "", "None"])
                 is_default_lesson = (lesson in ["Bài mở đầu", "Tổng quan chương", "", "None"])
                 
-                # LOGIC HIỂN THỊ NGHIÊM NGẶT:
                 if not is_default_chapter and not is_default_lesson:
-                    # Trường hợp tốt nhất: Có cả chương và bài cụ thể
                     display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
                 elif not is_default_chapter and is_default_lesson:
-                    # Trường hợp chỉ bắt được chương (thường gặp ở trang intro chương)
                     display_str = f"📖 {src_clean} ➜ {chapter}"
                 else:
-                    # Trường hợp Fallback: Không bắt được header -> Mới hiện loại tài liệu
                     doc_type = RAGEngine._detect_doc_type(src_clean)
                     display_str = f"📖 {src_clean} ➜ {doc_type}"
                 
                 unique_sources.add(display_str)
             
-            # Sắp xếp để hiển thị nhất quán (Sort A-Z)
             sorted_sources = sorted(list(unique_sources))
             
-            # Tạo HTML footer
             citation_html = ""
             if sorted_sources:
                 citation_html += "\n\n<div class='citation-footer'>"
@@ -584,7 +587,6 @@ NGUYÊN TẮC TRẢ LỜI:
                     citation_html += f"<span class='citation-item'>• {src}</span>"
                 citation_html += "</div>"
             
-            # Ghép nội dung và footer
             final_response = cleaned_response + citation_html
             
             yield final_response
