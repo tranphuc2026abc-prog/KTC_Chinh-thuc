@@ -6,6 +6,7 @@ import shutil
 import re
 import uuid
 import hashlib
+import time
 from typing import List, Generator
 
 # --- Imports với xử lý lỗi ---
@@ -231,28 +232,36 @@ class RAGEngine:
 
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
+        """
+        Cắt chunk thông minh có bắt số trang (Page Extraction)
+        """
         lines = text.split('\n')
         chunks = []
 
+        # Default Tracking
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
-        current_section = "Nội dung"
+        current_section = "Nội dung chi tiết"
+        current_page = "N/A" # Placeholder
+
         buffer = []
 
         # Regex patterns
         p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
+        # Regex giả định bắt số trang nếu LlamaParse trả về dạng "--- Page 1 ---" hoặc "Trang 1"
+        p_page = re.compile(r'^-+\s*(Page|Trang)\s*(\d+)\s*-+$', re.IGNORECASE)
 
         def clean_header(text): return text.replace('#', '').replace('*', '').strip()
 
-        def commit_chunk(buf, meta):
+        def commit_chunk(buf, meta, page):
             if not buf: return
             content = "\n".join(buf).strip()
-            if len(content) < 30: return # Skip too short chunks
+            if len(content) < 20: return 
 
-            # DETERMINISTIC CHUNK UID
-            hash_input = (meta.get("source", "") + "|" + current_lesson + "|" + content[:50]).encode('utf-8')
+            # Create Deterministic UID based on content hash
+            hash_input = (meta.get("source", "") + str(page) + content[:50]).encode('utf-8')
             chunk_hash = hashlib.sha256(hash_input).hexdigest()[:8]
 
             new_meta = meta.copy()
@@ -260,7 +269,8 @@ class RAGEngine:
                 "chunk_uid": chunk_hash,
                 "chapter": current_chapter,
                 "lesson": current_lesson,
-                "section": current_section
+                "section": current_section,
+                "page": page
             })
             chunks.append(Document(page_content=content, metadata=new_meta))
 
@@ -268,19 +278,26 @@ class RAGEngine:
             line_stripped = line.strip()
             if not line_stripped: continue
 
+            # Detect Page Break
+            if p_page.match(line_stripped):
+                commit_chunk(buffer, source_meta, current_page)
+                buffer = []
+                current_page = p_page.match(line_stripped).group(2)
+                continue
+
             if p_chapter.match(line_stripped):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, current_page)
                 buffer = []; current_chapter = clean_header(line_stripped)
             elif p_lesson.match(line_stripped):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, current_page)
                 buffer = []; current_lesson = clean_header(line_stripped)
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, current_page)
                 buffer = []; current_section = clean_header(line_stripped)
             else:
                 buffer.append(line)
 
-        commit_chunk(buffer, source_meta)
+        commit_chunk(buffer, source_meta, current_page)
         return chunks
 
     @staticmethod
@@ -337,7 +354,7 @@ class RAGEngine:
         return None
 
     # =========================================================================
-    # STRICT RAG GENERATION LOGIC - PHIÊN BẢN KIỂM CHỨNG KHKT
+    # STRICT RAG GENERATION LOGIC - LEVEL 2 VERIFICATION
     # =========================================================================
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
@@ -345,8 +362,9 @@ class RAGEngine:
             yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
             return
 
-        # 1. RETRIEVAL & RERANK
+        # --- GIAI ĐOẠN 1: RETRIEVAL & RERANK ---
         initial_docs = retriever.invoke(query)
+        
         scored_docs = []
         for doc in initial_docs:
             src = doc.metadata.get('source', '')
@@ -364,8 +382,7 @@ class RAGEngine:
                 reranked = []
                 for res in results:
                     idx = int(res['id'])
-                    # SGK Boost logic
-                    final_score = res['score'] + (scored_docs[idx]['bonus'] * 0.2)
+                    final_score = res['score'] + (scored_docs[idx]['bonus'] * 0.1) 
                     reranked.append({"res": res, "score": final_score})
                 
                 reranked.sort(key=lambda x: x['score'], reverse=True)
@@ -377,10 +394,10 @@ class RAGEngine:
             final_docs = [x["doc"] for x in scored_docs[:AppConfig.FINAL_K]]
 
         if not final_docs:
-            yield "Hiện tại dữ liệu SGK chưa có thông tin về câu hỏi này."
+            yield "Xin lỗi, hiện tại cơ sở dữ liệu SGK chưa có thông tin về vấn đề này."
             return
 
-        # 2. XÂY DỰNG REGISTRY NGUỒN
+        # --- GIAI ĐOẠN 2: XÂY DỰNG CONTEXT & REGISTRY (Level 2) ---
         valid_uids = {} 
         context_parts = []
         
@@ -388,59 +405,76 @@ class RAGEngine:
             uid = doc.metadata.get('chunk_uid')
             if not uid: continue
             
-            # Tạo nhãn đẹp cho nguồn (Badge Content)
             src_name = doc.metadata.get('source', 'Tài liệu').replace('.pdf', '')
-            lesson = doc.metadata.get('lesson', 'Bài học')
-            if len(src_name) > 20: src_name = src_name[:15] + "..."
+            lesson = doc.metadata.get('lesson', 'Bài ?')
+            page = doc.metadata.get('page', 'N/A')
             
-            # HTML Badge Replacement
-            badge_html = f'<span class="citation-badge">📘 {src_name} > {lesson}</span>'
+            display_name = src_name if len(src_name) < 15 else src_name[:12] + "..."
+            
+            # Tạo HTML Badge chuẩn KHKT: [Tên Sách > Bài > Trang]
+            page_str = f" - Tr.{page}" if page != "N/A" else ""
+            badge_html = f'<span class="citation-badge">📘 {display_name} > {lesson}{page_str}</span>'
+            
             valid_uids[uid] = badge_html
             
-            context_parts.append(f"<chunk id='{uid}'>\n{doc.page_content}\n</chunk>")
+            context_parts.append(f"--- Document ID: {uid} ---\nSource: {src_name} | Lesson: {lesson} | Page: {page}\nContent: {doc.page_content}\n----------------")
 
         full_context = "\n".join(context_parts)
 
-        # 3. PROMPT KỸ THUẬT
+        # --- GIAI ĐOẠN 3: PROMPT KỸ THUẬT (Strict Verification) ---
         system_prompt = (
-            "Bạn là Trợ lý AI giáo dục chuẩn KHKT. Nhiệm vụ: Trả lời câu hỏi CHỈ DỰA TRÊN dữ liệu context.\n"
-            "QUY TẮC BẮT BUỘC:\n"
-            "1. KHÔNG BỊA ĐẶT: Nếu không có tin, trả lời 'NO_INFO'.\n"
-            "2. TRÍCH DẪN: Mọi ý hoặc câu trả lời quan trọng phải gắn thẻ nguồn dạng [ID:chunk_uid].\n"
-            "   Ví dụ: Python là ngôn ngữ lập trình bậc cao [ID:12ab34cd].\n"
-            "3. Ngôn ngữ: Tiếng Việt sư phạm, ngắn gọn.\n\n"
-            "CONTEXT:\n"
-        ) + full_context
+            "Bạn là Trợ lý AI giáo dục KHKT nghiêm ngặt.\n"
+            "NHIỆM VỤ: Trả lời câu hỏi dựa trên Context được cung cấp.\n\n"
+            "QUY TẮC TUYỆT ĐỐI (VI PHẠM SẼ BỊ TRỪ ĐIỂM):\n"
+            "1. KHÔNG SÁNG TẠO: Chỉ dùng thông tin trong Context. Nếu không tìm thấy câu trả lời, in ra 'NO_INFO'.\n"
+            "2. BẮT BUỘC TRÍCH DẪN: Mọi câu trả lời phải kết thúc bằng thẻ nguồn [ID:uid].\n"
+            "   - Sai: Python là ngôn ngữ lập trình.\n"
+            "   - Đúng: Python là ngôn ngữ lập trình [ID:12ab34cd].\n"
+            "3. TRUNG THỰC: Không được bịa ID không có trong context.\n"
+            "4. NGÔN NGỮ: Tiếng Việt phổ thông, sư phạm, dễ hiểu cho học sinh.\n\n"
+            f"CONTEXT DỮ LIỆU:\n{full_context}"
+        )
 
         try:
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-                temperature=0.0,
+                temperature=0.0, # Zero Temperature để triệt tiêu ảo giác
                 stream=False
             )
             raw_response = completion.choices[0].message.content.strip()
 
+            # --- GIAI ĐOẠN 4: HẬU KIỂM (VALIDATION LAYER) ---
+            
             if "NO_INFO" in raw_response:
-                yield "Hiện tại dữ liệu SGK chưa có thông tin về câu hỏi này."
+                yield "Dữ liệu SGK hiện tại chưa có thông tin chính xác về câu hỏi này."
                 return
 
-            # 4. HẬU KIỂM VÀ DISPLAY (AUDIT LAYER)
-            # Regex sửa lỗi dòng 562 cũ:
             pattern = r"\[ID:([a-fA-F0-9]+)\]"
-            
-            # Kiểm tra ID ảo
             found_ids = re.findall(pattern, raw_response)
+            
+            # LUẬT SẮT: KHÔNG CÓ NGUỒN = KHÔNG HIỂN THỊ
             if not found_ids:
-                 # Nếu AI quên trích dẫn nhưng trả lời đúng, ta châm chước hiển thị nguồn đầu tiên (Fallback)
-                 first_id = list(valid_uids.keys())[0]
-                 raw_response += f" [ID:{first_id}]"
+                yield "⚠️ Câu trả lời bị hệ thống chặn vì AI không trích xuất được nguồn chứng thực (Verification Fail)."
+                return
 
+            # Kiểm tra ID ảo
+            valid_response = True
+            invalid_ids = []
+            for uid in found_ids:
+                if uid not in valid_uids:
+                    valid_response = False
+                    invalid_ids.append(uid)
+            
+            if not valid_response:
+                yield f"⚠️ Hệ thống phát hiện trích dẫn không hợp lệ ({', '.join(invalid_ids)}). Câu trả lời bị hủy bỏ để đảm bảo tính chính xác."
+                return
+
+            # Thay thế ID bằng Badge đẹp
             def replace_with_badge(match):
                 uid_found = match.group(1)
-                return valid_uids.get(uid_found, "") # Trả về HTML Badge
+                return valid_uids.get(uid_found, "")
 
-            # Thay thế ID text bằng Badge HTML
             final_display = re.sub(pattern, replace_with_badge, raw_response)
             
             yield final_display
@@ -505,5 +539,4 @@ def main():
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 if __name__ == "__main__":
-    import time 
     main()
