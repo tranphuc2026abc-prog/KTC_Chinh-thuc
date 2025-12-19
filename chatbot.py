@@ -6,7 +6,7 @@ import shutil
 import pickle
 import re
 import uuid
-import unicodedata # <--- THÊM MỚI: Để sửa lỗi font tiếng Việt
+import unicodedata # <--- THÊM: Thư viện xử lý lỗi font tiếng Việt
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
 
@@ -209,8 +209,10 @@ class UIManager:
             if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
                 if os.path.exists(AppConfig.VECTOR_DB_PATH):
                     shutil.rmtree(AppConfig.VECTOR_DB_PATH)
-                if os.path.exists(AppConfig.PROCESSED_MD_DIR): # Xóa luôn cache Markdown cũ
+                # THÊM: Xóa cache markdown cũ để ép hệ thống đọc lại từ đầu với bộ mã Unicode mới
+                if os.path.exists(AppConfig.PROCESSED_MD_DIR):
                     shutil.rmtree(AppConfig.PROCESSED_MD_DIR)
+                
                 st.session_state.pop('retriever_engine', None)
                 st.rerun()
 
@@ -287,36 +289,39 @@ class RAGEngine:
         if "12" in filename: return "12"
         return "general"
 
-    # --- [ĐÃ CHỈNH SỬA] LOGIC CHUNKING + UNICODE FIX + REGEX MỚI ---
+    # --- [ĐÃ SỬA] PHẦN NÀY LÀ QUAN TRỌNG NHẤT: XỬ LÝ LỖI FONT VÀ CẤU TRÚC KNTT ---
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
         # 1. Chuẩn hóa Unicode (NFC) để sửa lỗi font tiếng Việt (Ví dụ: "B à i" -> "Bài")
+        # 2. Xóa các ký tự ẩn (zero-width space) gây lỗi Regex
         text = unicodedata.normalize('NFC', text)
+        text = text.replace('\xa0', ' ').replace('\u200b', '')
+
         lines = text.split('\n')
         chunks = []
         
-        # Danh sách lọc rác
+        # Danh sách lọc rác (Chỉ dẫn mặc định)
         INVALID_MARKERS = {"Chương mở đầu", "Bài mở đầu", "Tổng quan chương", "", "None"}
         
-        # Biến trạng thái
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
         
         buffer = []
 
-        # --- REGEX MỚI (Mạnh mẽ hơn) ---
-        # 1. Bắt CHƯƠNG hoặc CHỦ ĐỀ (Bắt cả số La Mã, số thường, chữ cái A, B, F...)
-        # Thêm \s* để chấp nhận khoảng trắng thừa: "Chủ  đề"
-        p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương|CHỦ\s*ĐỀ|Chủ\s*đề)\s+([IVX0-9A-Z]+).*$', re.IGNORECASE)
+        # --- REGEX ĐA NĂNG CHO SÁCH KNTT ---
+        # 1. Bắt CHỦ ĐỀ hoặc CHƯƠNG. Chấp nhận: "Chủ đề 1", "Chủ đề A", "Chương I"...
+        # Regex này chấp nhận cả các ký tự trang trí Markdown như #, *
+        p_chapter = re.compile(r'(?:^|[\#\*\s]+)(CHƯƠNG|Chương|CHỦ\s*ĐỀ|Chủ\s*đề)\s+([IVX0-9A-Z]+)', re.IGNORECASE)
         
-        # 2. Bắt BÀI (Chấp nhận Bài 1, Bài 01...)
-        p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
+        # 2. Bắt BÀI. Chấp nhận "Bài 1", "Bài 01"...
+        p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI|Bài)\s+([0-9]+)', re.IGNORECASE)
         
-        # 3. Bắt mục con
+        # 3. Bắt Mục con
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
 
         def clean_header(text):
+            # Xóa sạch các ký tự markdown thừa
             return text.replace('#', '').replace('*', '').strip()
 
         def commit_chunk(buf, meta):
@@ -324,11 +329,11 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 50: return 
             
-            # --- BỘ LỌC KHKT ---
+            # --- CỔNG KIỂM SOÁT (STRICT GATEKEEPING) ---
+            # Chỉ lưu chunk nếu đã tìm thấy tên Chủ đề HOẶC tên Bài hợp lệ
             is_valid_chapter = current_chapter not in INVALID_MARKERS
             is_valid_lesson = current_lesson not in INVALID_MARKERS
 
-            # Logic: Phải có ít nhất Chương/Chủ đề HOẶC Bài thì mới lưu
             if not (is_valid_chapter or is_valid_lesson):
                 return 
 
@@ -349,22 +354,30 @@ class RAGEngine:
             line_stripped = line.strip()
             if not line_stripped: continue
             
-            # --- PHÂN TÍCH ---
-            if p_chapter.match(line_stripped):
+            # Quét tìm Chủ đề/Chương
+            match_chap = p_chapter.search(line_stripped)
+            if match_chap:
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_chapter = clean_header(line_stripped)
-                # Reset bài khi qua chủ đề mới
+                # Lấy tên sạch: "Chủ đề A" hoặc "Chương I"
+                prefix = match_chap.group(1).title() # "Chủ Đề"
+                suffix = match_chap.group(2)         # "A"
+                current_chapter = f"{prefix} {suffix}"
+                
+                # Reset bài khi sang chủ đề mới
                 current_lesson = "Tổng quan chương" 
                 current_section = "Giới thiệu"
-                print(f"✅ Bắt được: {current_chapter}")
+                print(f"✅ Phát hiện: {current_chapter}") # In ra terminal để kiểm tra
             
-            elif p_lesson.match(line_stripped):
+            # Quét tìm Bài
+            elif p_lesson.search(line_stripped):
+                match_less = p_lesson.search(line_stripped)
                 commit_chunk(buffer, source_meta)
                 buffer = []
-                current_lesson = clean_header(line_stripped)
+                # Lấy tên sạch: "Bài 1"
+                current_lesson = f"Bài {match_less.group(2)}"
                 current_section = "Tổng quan bài"
-                print(f"   👉 Bắt được: {current_lesson}")
+                print(f"   👉 Phát hiện: {current_lesson}")
                 
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
                 commit_chunk(buffer, source_meta)
@@ -486,22 +499,17 @@ class RAGEngine:
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo, 
-        bao gồm cả lỗi Instruction Leakage ("Hệ thống tự động...").
+        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo.
         """
-        # 1. Loại bỏ tiếng Trung/Hàn/Nhật
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text)
         
-        # 2. [CHỈNH SỬA CITATION] Cắt bỏ các ID/Citation do LLM tự bịa
         hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
         text = hallucination_pattern.sub("", text)
         
-        # 3. [FIX INSTRUCTION LEAKAGE] Loại bỏ dòng LLM "nhại" lại chỉ dẫn hệ thống
         leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
         text = leakage_pattern.sub("", text)
         
-        # 4. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
         lines = text.split('\n')
         cleaned_lines = []
         for line in lines:
@@ -586,7 +594,7 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
             # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - STRICT MODE) ---
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # --- [CẬP NHẬT] Logic hiển thị Nguồn 3 mức (Sách -> Chủ đề -> Bài) ---
+            # Logic hiển thị Nguồn 3 mức (Sách -> Chủ đề -> Bài)
             unique_sources = set()
             for doc in final_docs:
                 src_raw = doc.metadata.get('source', '')
@@ -595,6 +603,7 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
                 chapter = doc.metadata.get('chapter', '').strip()
                 lesson = doc.metadata.get('lesson', '').strip()
                 
+                # Loại bỏ các giá trị mặc định/rác
                 invalid_chapters = ["Chương mở đầu", "", "None"]
                 invalid_lessons = ["Bài mở đầu", "Tổng quan chương", "", "None"]
                 
