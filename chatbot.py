@@ -134,7 +134,7 @@ class UIManager:
                 border-left: 5px solid #00b4d8;
             }
             
-            /* [MODIFIED] Style mới cho phần Nguồn tham khảo footer */
+            /* Style cho phần Nguồn tham khảo footer */
             .citation-footer {
                 margin-top: 15px;
                 padding-top: 10px;
@@ -289,6 +289,7 @@ class RAGEngine:
         lines = text.split('\n')
         chunks = []
         
+        # Mặc định ban đầu
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
@@ -459,7 +460,6 @@ class RAGEngine:
     def _sanitize_output(text: str) -> str:
         """
         Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật) và làm sạch format.
-        [MODIFIED] Chỉ giữ lại chức năng xóa ký tự lạ, không động đến ID vì ID không còn do LLM sinh.
         """
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text) # Thay bằng rỗng để sạch hơn
@@ -494,21 +494,16 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: MAPPING REGISTRY (Sổ cái ánh xạ) ---
-        # [MODIFIED] Không cần tạo uid_to_citation_text để map ngược nữa
-        # Chỉ cần build context cho LLM hiểu
+        # --- TẦNG 2: MAPPING REGISTRY ---
         context_parts = []
         for doc in final_docs:
-             # Giữ nguyên cấu trúc input để LLM có dữ liệu
              context_parts.append(
                 f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - ĐÃ SỬA ĐỔI) ---
-        # [MODIFIED] Xóa toàn bộ hướng dẫn về [ID:...]. 
-        # Ép LLM chỉ trả lời nội dung thuần túy.
+        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT) ---
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
 Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
@@ -541,34 +536,43 @@ NGUYÊN TẮC TRẢ LỜI:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - ĐÃ SỬA ĐỔI) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - FIX CITATION KHKT) ---
             
-            # 1. Vệ sinh văn bản (chỉ xóa ký tự lạ)
+            # 1. Vệ sinh văn bản
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # 2. [MODIFIED] Xây dựng Footer trích dẫn từ final_docs (Deterministic Citation)
-            # Logic: Duyệt qua final_docs -> Lấy metadata -> Gộp trùng -> Tạo HTML
+            # 2. Xây dựng Footer trích dẫn chuẩn KHKT
+            # Logic: Duyệt qua final_docs -> Ưu tiên Chapter/Lesson -> Chỉ fallback khi rỗng
             
             unique_sources = set()
             for doc in final_docs:
                 src_raw = doc.metadata.get('source', '')
                 src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
                 
-                # Logic xác định tên chương/bài để hiển thị đẹp
-                chapter = doc.metadata.get('chapter', 'Chương ?')
-                lesson = doc.metadata.get('lesson', 'Bài ?')
+                # Lấy metadata chương, bài
+                chapter = doc.metadata.get('chapter', '').strip()
+                lesson = doc.metadata.get('lesson', '').strip()
                 
-                doc_type = RAGEngine._detect_doc_type(src_clean)
+                # Kiểm tra xem metadata có phải là giá trị mặc định của hệ thống chunking không
+                # "Chương mở đầu" và "Bài mở đầu" là default value trong _structural_chunking
+                is_default_chapter = (chapter in ["Chương mở đầu", "", "None"])
+                is_default_lesson = (lesson in ["Bài mở đầu", "Tổng quan chương", "", "None"])
                 
-                # Nếu là chương/bài mặc định (do parsing) thì hiển thị loại tài liệu
-                if (chapter == "Chương mở đầu") and (lesson == "Bài mở đầu" or lesson == "Tổng quan chương"):
-                    display_str = f"📖 {src_clean} ➜ {doc_type}"
-                else:
+                # LOGIC HIỂN THỊ NGHIÊM NGẶT:
+                if not is_default_chapter and not is_default_lesson:
+                    # Trường hợp tốt nhất: Có cả chương và bài cụ thể
                     display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+                elif not is_default_chapter and is_default_lesson:
+                    # Trường hợp chỉ bắt được chương (thường gặp ở trang intro chương)
+                    display_str = f"📖 {src_clean} ➜ {chapter}"
+                else:
+                    # Trường hợp Fallback: Không bắt được header -> Mới hiện loại tài liệu
+                    doc_type = RAGEngine._detect_doc_type(src_clean)
+                    display_str = f"📖 {src_clean} ➜ {doc_type}"
                 
                 unique_sources.add(display_str)
             
-            # Sắp xếp để hiển thị nhất quán
+            # Sắp xếp để hiển thị nhất quán (Sort A-Z)
             sorted_sources = sorted(list(unique_sources))
             
             # Tạo HTML footer
