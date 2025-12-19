@@ -133,18 +133,29 @@ class UIManager:
                 background: white; border: 1px solid #e9ecef;
                 border-left: 5px solid #00b4d8;
             }
-            /* Style cho Citation để nổi bật nguồn */
-            .citation-source {
-                font-size: 0.85em;
-                color: #d63384; /* Màu hồng đậm */
-                background-color: #f8f9fa;
-                padding: 2px 6px;
-                border-radius: 4px;
-                border: 1px solid #e9ecef;
-                font-weight: 600;
-                margin-left: 5px;
-                display: inline-block;
+            
+            /* [MODIFIED] Style mới cho phần Nguồn tham khảo footer */
+            .citation-footer {
+                margin-top: 15px;
+                padding-top: 10px;
+                border-top: 1px dashed #ced4da;
+                font-size: 0.9rem;
+                color: #495057;
             }
+            .citation-header {
+                font-weight: 700;
+                color: #d63384; /* Màu hồng đậm đặc trưng */
+                margin-bottom: 5px;
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            .citation-item {
+                margin-left: 5px;
+                margin-bottom: 3px;
+                display: block;
+            }
+            
             div.stButton > button {
                 border-radius: 8px; background-color: white; color: #0077b6;
                 border: 1px solid #90e0ef; transition: all 0.2s;
@@ -444,19 +455,14 @@ class RAGEngine:
         except Exception:
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
     
-    # [NEW] Hàm vệ sinh văn bản để xóa ký tự lạ
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
         Vệ sinh văn bản: Loại bỏ ký tự CJK (Trung/Hàn/Nhật) và làm sạch format.
+        [MODIFIED] Chỉ giữ lại chức năng xóa ký tự lạ, không động đến ID vì ID không còn do LLM sinh.
         """
-        # Regex bắt tất cả các ký tự CJK phổ biến
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
-        
-        # Nếu gặp từ tiếng Trung, thay thế bằng "từ khóa" (phù hợp ngữ cảnh) hoặc xóa bỏ
-        # Ở đây ta thay bằng "từ khóa" nếu nó là danh từ, hoặc xóa nếu rác
-        # Để an toàn nhất: Thay bằng text tiếng Việt generic hoặc xóa
-        text = cjk_pattern.sub("từ khóa", text) 
+        text = cjk_pattern.sub("", text) # Thay bằng rỗng để sạch hơn
         return text
 
     @staticmethod
@@ -489,48 +495,30 @@ class RAGEngine:
             return
 
         # --- TẦNG 2: MAPPING REGISTRY (Sổ cái ánh xạ) ---
-        uid_to_citation_text = {}
+        # [MODIFIED] Không cần tạo uid_to_citation_text để map ngược nữa
+        # Chỉ cần build context cho LLM hiểu
         context_parts = []
-
         for doc in final_docs:
-            uid = doc.metadata.get('chunk_uid')
-            if not uid: continue
-            
-            src_raw = doc.metadata.get('source', '')
-            src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
-            chapter = doc.metadata.get('chapter', 'Chương ?')
-            lesson = doc.metadata.get('lesson', 'Bài ?')
-            
-            # Logic hiển thị Citation
-            is_default_chapter = (chapter == "Chương mở đầu")
-            is_default_lesson = (lesson == "Bài mở đầu" or lesson == "Tổng quan chương")
-            
-            if is_default_chapter and is_default_lesson:
-                 doc_type = RAGEngine._detect_doc_type(src_clean)
-                 citation_display = f"📖 {src_clean} ➜ {doc_type}" 
-            else:
-                 citation_display = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
-            
-            uid_to_citation_text[uid] = citation_display
-            
-            context_parts.append(
-                f"--- BEGIN DATA ---\nREF_CODE: {uid}\n{doc.page_content}\n--- END DATA ---"
+             # Giữ nguyên cấu trúc input để LLM có dữ liệu
+             context_parts.append(
+                f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - NGHIÊM NGẶT) ---
-        system_prompt = f"""Bạn là KTC Chatbot. Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT].
+        # --- TẦNG 3: PROMPT (THIẾT QUÂN LUẬT - ĐÃ SỬA ĐỔI) ---
+        # [MODIFIED] Xóa toàn bộ hướng dẫn về [ID:...]. 
+        # Ép LLM chỉ trả lời nội dung thuần túy.
+        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
+Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
-CÁC QUY TẮC BẮT BUỘC (VI PHẠM LÀ LỖI HỆ THỐNG):
-1. NGÔN NGỮ: Chỉ dùng Tiếng Việt. Tuyệt đối KHÔNG xuất hiện ký tự Trung/Hàn/Nhật (như 关键词).
-2. TRÍCH DẪN (CITATION):
-   - SAI: x = 1 [ID:abcd], y = 2 [ID:xyzt]. (Tuyệt đối KHÔNG chèn citation vào giữa dòng code hoặc giữa các biến số).
-   - ĐÚNG: x = 1, y = 2. [ID:abcd] (Chỉ được chèn citation ở CUỐI CÂU hoặc CUỐI ĐOẠN văn bản).
-3. CODE PYTHON:
-   - KHÔNG bao giờ chèn [ID:...] vào bên trong khối lệnh (```python ... ```).
-   - Hãy để nguồn trích dẫn ở dòng văn bản giải thích phía trên hoặc phía dưới khối code.
-4. Trả lời ngắn gọn, đúng trọng tâm.
+NGUYÊN TẮC TRẢ LỜI:
+1. Chỉ sử dụng thông tin được cung cấp trong [CONTEXT].
+2. Nếu không có thông tin, hãy nói "Tôi chưa tìm thấy thông tin trong tài liệu".
+3. KHÔNG tự bịa ra thông tin.
+4. Ngôn ngữ: Tiếng Việt 100%, trang trọng, sư phạm.
+5. KHÔNG BAO GIỜ tự viết nguồn tham khảo hay trích dẫn dạng [ID:...] trong câu trả lời. Hệ thống sẽ tự làm việc này.
+6. Trình bày rõ ràng, nếu là code Python phải để trong ```python ... ```.
 
 [CONTEXT]
 {full_context}
@@ -553,22 +541,47 @@ CÁC QUY TẮC BẮT BUỘC (VI PHẠM LÀ LỖI HỆ THỐNG):
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (QUAN TRỌNG) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - ĐÃ SỬA ĐỔI) ---
             
-            # 1. Quét sạch ký tự lạ (Trung/Hàn)
+            # 1. Vệ sinh văn bản (chỉ xóa ký tự lạ)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
-            # 2. Xử lý hiển thị Citation
-            pattern_broad = r'\[.*[:\s]([a-zA-Z0-9]{8})\s*\]'
+            # 2. [MODIFIED] Xây dựng Footer trích dẫn từ final_docs (Deterministic Citation)
+            # Logic: Duyệt qua final_docs -> Lấy metadata -> Gộp trùng -> Tạo HTML
             
-            def citation_mapper(match):
-                uid = match.group(1) 
-                if uid in uid_to_citation_text:
-                    # Thêm khoảng trắng trước citation để không dính chữ
-                    return f" <span class='citation-source'>{uid_to_citation_text[uid]}</span>"
-                return "" 
-
-            final_response = re.sub(pattern_broad, citation_mapper, cleaned_response)
+            unique_sources = set()
+            for doc in final_docs:
+                src_raw = doc.metadata.get('source', '')
+                src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
+                
+                # Logic xác định tên chương/bài để hiển thị đẹp
+                chapter = doc.metadata.get('chapter', 'Chương ?')
+                lesson = doc.metadata.get('lesson', 'Bài ?')
+                
+                doc_type = RAGEngine._detect_doc_type(src_clean)
+                
+                # Nếu là chương/bài mặc định (do parsing) thì hiển thị loại tài liệu
+                if (chapter == "Chương mở đầu") and (lesson == "Bài mở đầu" or lesson == "Tổng quan chương"):
+                    display_str = f"📖 {src_clean} ➜ {doc_type}"
+                else:
+                    display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
+                
+                unique_sources.add(display_str)
+            
+            # Sắp xếp để hiển thị nhất quán
+            sorted_sources = sorted(list(unique_sources))
+            
+            # Tạo HTML footer
+            citation_html = ""
+            if sorted_sources:
+                citation_html += "\n\n<div class='citation-footer'>"
+                citation_html += "<div class='citation-header'>📚 Nguồn tham khảo xác thực:</div>"
+                for src in sorted_sources:
+                    citation_html += f"<span class='citation-item'>• {src}</span>"
+                citation_html += "</div>"
+            
+            # Ghép nội dung và footer
+            final_response = cleaned_response + citation_html
             
             yield final_response
 
