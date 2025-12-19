@@ -14,8 +14,13 @@ from typing import List, Tuple, Optional, Dict, Generator
 try:
     import nest_asyncio
     nest_asyncio.apply() 
-    from llama_parse import LlamaParse 
-    
+    # Ưu tiên LlamaParse, nếu không có sẽ dùng PyPDFLoader làm fallback
+    try:
+        from llama_parse import LlamaParse 
+    except ImportError:
+        LlamaParse = None
+        
+    from langchain_community.document_loaders import PyPDFLoader # Fallback loader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_community.retrievers import BM25Retriever
@@ -269,11 +274,6 @@ class RAGEngine:
             return None
 
     @staticmethod
-    def _detect_doc_type(source_name: str) -> str:
-        # Giữ logic detect đơn giản, quan trọng là cấu trúc bên trong
-        return "SGK Tin học KNTT"
-
-    @staticmethod
     def _detect_grade(filename: str) -> str:
         filename = filename.lower()
         if "10" in filename: return "10"
@@ -284,8 +284,6 @@ class RAGEngine:
     # --- [MODIFIED] XỬ LÝ CHUNK THEO CẤU TRÚC KNTT (TOPIC -> LESSON) ---
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        # FIX RAG STRUCTURE: SOURCE–TOPIC–LESSON
-        
         # 1. CLEANING
         text = unicodedata.normalize('NFC', text)
         text = text.replace('\xa0', ' ').replace('\u200b', '')
@@ -293,50 +291,48 @@ class RAGEngine:
         lines = text.split('\n')
         chunks = []
         
-        # 2. STATE TRACKING (Khởi tạo là None để lọc nghiêm ngặt)
-        current_topic = None   # Thay cho Chapter cũ
-        current_lesson = None  # Thay cho Lesson cũ
+        # 2. STATE TRACKING
+        current_topic = None   
+        current_lesson = None  
         current_section = "Nội dung"
         
         buffer = []
 
         # 3. REGEX ĐẶC THÙ CHO SGK KNTT
-        # Bắt "Chủ đề 1", "Chủ đề A", "Chủ đề F: Giải quyết vấn đề..."
-        # Regex này bắt buộc có chữ "Chủ đề" và theo sau là ID (số hoặc chữ)
         p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
-        
-        # Bắt "Bài 1", "Bài 10", "Bài 18"
         p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
-        
-        # Bắt mục con
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
 
-        def commit_chunk(buf, meta):
+        def commit_chunk(buf, meta, is_strict=True):
             if not buf: return
             content = "\n".join(buf).strip()
-            if len(content) < 30: return 
+            if len(content) < 20: return 
             
-            # FIX RAG STRUCTURE: STRICT FILTER
-            # Chỉ lưu chunk nếu ĐÃ xác định được cả Chủ đề VÀ Bài
-            if not current_topic or not current_lesson:
+            # Logic nghiêm ngặt: Phải có Bài/Chủ đề mới lưu
+            if is_strict and (not current_topic or not current_lesson):
                 return 
+
+            # Logic fallback: Nếu không bắt được chủ đề, vẫn lưu dưới dạng General
+            chunk_topic = current_topic if current_topic else "Kiến thức chung"
+            chunk_lesson = current_lesson if current_lesson else "Nội dung chi tiết"
 
             chunk_uid = str(uuid.uuid4())[:8]
             new_meta = meta.copy()
             new_meta.update({
                 "chunk_uid": chunk_uid,
-                "chapter": current_topic,  # Map Topic vào key 'chapter' để tương thích logic hiển thị cũ
-                "lesson": current_lesson,
+                "chapter": chunk_topic,
+                "lesson": chunk_lesson,
                 "section": current_section,
-                "context_str": f"{current_topic} > {current_lesson} > {current_section}" 
+                "context_str": f"{chunk_topic} > {chunk_lesson} > {current_section}" 
             })
             
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
         # --- QUÉT FILE ---
-        print(f"\n--- ĐANG QUÉT KNTT: {source_meta['source']} ---")
-
+        # print(f"--- Processing text length: {len(text)} ---") 
+        
+        has_structure = False
         for line in lines:
             line_stripped = line.strip()
             if not line_stripped: continue
@@ -344,99 +340,138 @@ class RAGEngine:
             # 4. LOGIC PHÁT HIỆN CHỦ ĐỀ (TOPIC)
             match_topic = p_topic.search(line_stripped)
             if match_topic:
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
-                
-                # Format lại đẹp: "Chủ đề 1: Tiêu đề..."
                 topic_id = match_topic.group(2).strip()
                 topic_text = match_topic.group(3).strip(" :.-")
                 current_topic = f"Chủ đề {topic_id} {topic_text}".strip()
-                
-                # Khi sang Chủ đề mới, Bài cũ không còn hiệu lực -> Reset Lesson
                 current_lesson = None 
                 current_section = "Giới thiệu chủ đề"
-                print(f"✅ [TOPIC] {current_topic}")
+                has_structure = True
             
             # 5. LOGIC PHÁT HIỆN BÀI (LESSON)
             elif p_lesson.search(line_stripped):
                 match_lesson = p_lesson.search(line_stripped)
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
-                
                 lesson_id = match_lesson.group(2).strip()
                 lesson_text = match_lesson.group(3).strip(" :.-")
                 current_lesson = f"Bài {lesson_id} {lesson_text}".strip()
-                
                 current_section = "Tổng quan bài"
-                print(f"   👉 [LESSON] {current_lesson}")
+                has_structure = True
                 
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
-                commit_chunk(buffer, source_meta)
+                commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
                 current_section = line_stripped.replace('#','').strip()
                 
             else:
                 buffer.append(line)
         
-        commit_chunk(buffer, source_meta)
+        commit_chunk(buffer, source_meta, is_strict=True)
+
+        # --- FALLBACK MECHANISM ---
+        # Nếu quét cả file mà không thấy cấu trúc "Chủ đề/Bài" (do PDFLoader đọc kém), 
+        # chuyển sang cắt chunk thông thường để đảm bảo không mất dữ liệu.
+        if not chunks and not has_structure:
+            print(f"⚠️ Cảnh báo: Không phát hiện cấu trúc chuẩn trong {source_meta['source']}. Chuyển sang chế độ cắt đoạn phổ thông.")
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            raw_chunks = splitter.split_text(text)
+            for rc in raw_chunks:
+                meta = source_meta.copy()
+                meta.update({
+                    "chapter": "Tài liệu bổ sung",
+                    "lesson": "Nội dung trích xuất",
+                    "context_str": f"{source_meta['source']}"
+                })
+                chunks.append(Document(page_content=rc, metadata=meta))
+
         return chunks
 
     @staticmethod
-    def _parse_pdf_with_llama(file_path: str) -> str:
+    def _parse_pdf_smart(file_path: str) -> str:
+        """
+        Hàm đọc PDF thông minh: Thử LlamaParse trước, nếu lỗi thì dùng PyPDFLoader (miễn phí, offline)
+        """
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
         file_name = os.path.basename(file_path)
         md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
         
+        # 1. Kiểm tra Cache
         if os.path.exists(md_file_path):
             with open(md_file_path, "r", encoding="utf-8") as f:
                 return f.read()
         
+        markdown_text = ""
+        
+        # 2. Thử dùng LlamaParse (Ưu tiên)
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
-        if not llama_api_key:
-            return "ERROR: Missing LLAMA_CLOUD_API_KEY"
+        used_llama = False
+        
+        if llama_api_key and LlamaParse:
+            try:
+                parser = LlamaParse(
+                    api_key=llama_api_key,
+                    result_type="markdown",
+                    language="vi",
+                    verbose=True
+                )
+                documents = parser.load_data(file_path)
+                markdown_text = documents[0].text
+                used_llama = True
+            except Exception as e:
+                print(f"⚠️ LlamaParse failed cho {file_name}: {e}. Chuyển sang PyPDFLoader.")
+        
+        # 3. Fallback: Dùng PyPDFLoader (Nếu LlamaParse lỗi hoặc không có key)
+        if not used_llama or not markdown_text:
+            try:
+                loader = PyPDFLoader(file_path)
+                docs = loader.load()
+                # Nối text các trang lại
+                markdown_text = "\n\n".join([d.page_content for d in docs])
+            except Exception as e:
+                return f"ERROR reading file {file_name}: {str(e)}"
 
-        try:
-            parser = LlamaParse(
-                api_key=llama_api_key,
-                result_type="markdown",
-                language="vi",
-                verbose=True,
-                parsing_instruction="Đây là tài liệu giáo khoa Tin học KNTT. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc Chủ đề (#), Bài (##)."
-            )
-            documents = parser.load_data(file_path)
-            markdown_text = documents[0].text
-            
+        # 4. Lưu Cache
+        if markdown_text:
             with open(md_file_path, "w", encoding="utf-8") as f:
                 f.write(markdown_text)
             
-            return markdown_text
-        except Exception as e:
-            return f"Error parsing {file_name}: {str(e)}"
+        return markdown_text
 
     @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
         if not os.path.exists(pdf_dir):
+            os.makedirs(pdf_dir, exist_ok=True) # Tự tạo thư mục nếu chưa có
             return []
         
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
         all_chunks: List[Document] = []
         status_text = st.empty()
 
+        if not pdf_files:
+            st.warning(f"⚠️ Thư mục {pdf_dir} đang trống. Vui lòng bỏ file PDF SGK vào.")
+            return []
+
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
             status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
             
-            markdown_content = RAGEngine._parse_pdf_with_llama(file_path)
+            # Dùng hàm đọc thông minh mới
+            content = RAGEngine._parse_pdf_smart(file_path)
             
-            if "ERROR" not in markdown_content and len(markdown_content) > 50:
+            if content and not content.startswith("ERROR"):
                  meta = {
                      "source": source_file, 
                      "grade": RAGEngine._detect_grade(source_file)
                  }
-                 file_chunks = RAGEngine._structural_chunking(markdown_content, meta)
-                 all_chunks.extend(file_chunks)
+                 file_chunks = RAGEngine._structural_chunking(content, meta)
+                 if file_chunks:
+                    all_chunks.extend(file_chunks)
+                 else:
+                    print(f"⚠️ File {source_file} đọc được text nhưng không tạo được chunk nào.")
             else:
-                pass 
+                st.error(f"Lỗi đọc file {source_file}: {content}")
                 
         status_text.empty()
         return all_chunks
@@ -446,15 +481,18 @@ class RAGEngine:
         if not embeddings: return None
 
         vector_db = None
+        # Kiểm tra DB cũ
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
             except Exception: pass
 
+        # Nếu chưa có DB, tạo mới
         if not vector_db:
             chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
+            
             if not chunk_docs:
-                st.error(f"Không tìm thấy tài liệu hoặc lỗi xử lý trong {AppConfig.PDF_DIR}")
+                st.error(f"Không tạo được dữ liệu từ {AppConfig.PDF_DIR}. Hãy kiểm tra: 1. Có file PDF không? 2. File có text không (hay là ảnh scan)?")
                 return None
             
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
@@ -462,20 +500,27 @@ class RAGEngine:
 
         try:
             docstore_docs = list(vector_db.docstore._dict.values())
-            bm25_retriever = BM25Retriever.from_documents(docstore_docs)
-            bm25_retriever.k = AppConfig.RETRIEVAL_K
+            # Kiểm tra nếu ít document quá thì giảm k của BM25
+            bm25_k = min(AppConfig.RETRIEVAL_K, len(docstore_docs))
+            
+            if bm25_k > 0:
+                bm25_retriever = BM25Retriever.from_documents(docstore_docs)
+                bm25_retriever.k = bm25_k
 
-            faiss_retriever = vector_db.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5}
-            )
+                faiss_retriever = vector_db.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5}
+                )
 
-            ensemble_retriever = EnsembleRetriever(
-                retrievers=[bm25_retriever, faiss_retriever],
-                weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
-            )
-            return ensemble_retriever
-        except Exception:
+                ensemble_retriever = EnsembleRetriever(
+                    retrievers=[bm25_retriever, faiss_retriever],
+                    weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
+                )
+                return ensemble_retriever
+            else:
+                return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+        except Exception as e:
+            print(f"Lỗi build retriever: {e}. Fallback về FAISS thường.")
             return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
     
     @staticmethod
@@ -502,11 +547,16 @@ class RAGEngine:
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
         if not retriever:
-            yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
+            yield "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát."
             return
         
         # --- TẦNG 1: RETRIEVAL ---
-        initial_docs = retriever.invoke(query)
+        try:
+            initial_docs = retriever.invoke(query)
+        except Exception:
+            yield "Đang gặp lỗi truy vấn dữ liệu."
+            return
+
         final_docs = []
         try:
             ranker = RAGEngine.load_reranker()
@@ -538,14 +588,13 @@ class RAGEngine:
         full_context = "\n".join(context_parts)
 
         # --- TẦNG 3: PROMPT ---
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
+        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học trường Phạm Kiệt.
 Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
 QUY TẮC BẮT BUỘC:
 1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. KHÔNG tự viết nguồn tham khảo.
-3. KHÔNG bịa đặt ID tài liệu.
-4. Nếu không có thông tin, hãy trả lời trung thực.
+2. KHÔNG tự viết nguồn tham khảo giả.
+3. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
 
 [CONTEXT]
 {full_context}
@@ -571,19 +620,20 @@ QUY TẮC BẮT BUỘC:
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
             # --- FIX RAG STRUCTURE: CITATION LOGIC ---
-            # Lưu ý: 'chapter' ở đây đang chứa thông tin 'Topic' do đã map ở hàm chunking
             unique_sources = set()
             for doc in final_docs:
                 src_raw = doc.metadata.get('source', '')
                 src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
                 
-                # Ở đây: chapter = Topic (Chủ đề X), lesson = Lesson (Bài Y)
                 topic = doc.metadata.get('chapter', '').strip()
                 lesson = doc.metadata.get('lesson', '').strip()
                 
                 if topic and lesson:
                     display_str = f"📖 {src_clean} ➜ {topic} ➜ {lesson}"
                     unique_sources.add(display_str)
+                elif src_clean:
+                    # Fallback citation for non-structured docs
+                    unique_sources.add(f"📖 {src_clean}")
 
             sorted_sources = sorted(list(unique_sources))
             
@@ -621,7 +671,7 @@ def main():
     groq_client = RAGEngine.load_groq_client()
 
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (LlamaParse + Semantic Chunking)..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Smart Parsing + Semantic Chunking)..."):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
             if st.session_state.retriever_engine:
