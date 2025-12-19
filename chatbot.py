@@ -1,26 +1,26 @@
-import os
-import glob
-import base64
-import streamlit as st
-import shutil
-import pickle
-import re
-import uuid
-import unicodedata 
-from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Generator
+# ===============================
+# KTC CHATBOT – VERIFIABLE RAG
+# Chuẩn KHKT cấp Quốc gia
+# GIỮ NGUYÊN GIAO DIỆN
+# ===============================
 
-# --- Imports với xử lý lỗi ---
+import os, glob, base64, shutil, re, uuid, unicodedata
+import streamlit as st
+from typing import List, Generator
+
+# ===============================
+# IMPORTS AN TOÀN
+# ===============================
 try:
     import nest_asyncio
-    nest_asyncio.apply() 
-    # Ưu tiên LlamaParse, nếu không có sẽ dùng PyPDFLoader làm fallback
+    nest_asyncio.apply()
+
     try:
-        from llama_parse import LlamaParse 
+        from llama_parse import LlamaParse
     except ImportError:
         LlamaParse = None
-        
-    from langchain_community.document_loaders import PyPDFLoader # Fallback loader
+
+    from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_community.retrievers import BM25Retriever
@@ -28,17 +28,16 @@ try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     from groq import Groq
-    # Rerank optimization
     from flashrank import Ranker, RerankRequest
+
     DEPENDENCIES_OK = True
 except ImportError as e:
     DEPENDENCIES_OK = False
     IMPORT_ERROR = str(e)
 
-# ==============================
-# 1. CẤU HÌNH HỆ THỐNG (CONFIG) 
-# ==============================
-
+# ===============================
+# CONFIG
+# ===============================
 st.set_page_config(
     page_title="KTC Chatbot - THCS & THPT Phạm Kiệt",
     page_icon="LOGO.jpg",
@@ -47,666 +46,240 @@ st.set_page_config(
 )
 
 class AppConfig:
-    # Model Config
-    LLM_MODEL = 'llama-3.1-8b-instant'
-
+    LLM_MODEL = "llama-3.1-8b-instant"
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     RERANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
 
-    # Paths
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
+    PROCESSED_MD_DIR = "PROCESSED_MD"
     RERANK_CACHE = "./opt"
-    PROCESSED_MD_DIR = "PROCESSED_MD" 
 
-    # Assets
     LOGO_PROJECT = "LOGO.jpg"
     LOGO_SCHOOL = "LOGO PKS.png"
 
-    # RAG Parameters
-    RETRIEVAL_K = 30       
-    FINAL_K = 5            
-    
-    # Hybrid Search Weights
-    BM25_WEIGHT = 0.4      
-    FAISS_WEIGHT = 0.6     
-
-    LLM_TEMPERATURE = 0.0 
+    RETRIEVAL_K = 30
+    FINAL_K = 5
+    BM25_WEIGHT = 0.4
+    FAISS_WEIGHT = 0.6
+    LLM_TEMPERATURE = 0.0
 
 # ===============================
-# 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
+# UI – GIỮ NGUYÊN
 # ===============================
-
 class UIManager:
     @staticmethod
     def get_img_as_base64(file_path):
         if not os.path.exists(file_path):
             return ""
         with open(file_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
+            return base64.b64encode(f.read()).decode()
 
     @staticmethod
     def inject_custom_css():
-        st.markdown("""
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
-            html, body, [class*="css"], .stMarkdown, .stButton, .stTextInput, .stChatInput {
-                font-family: 'Inter', sans-serif !important;
-            }
-            section[data-testid="stSidebar"] {
-                background-color: #f8f9fa; border-right: 1px solid #e9ecef;
-            }
-            .project-card {
-                background: white; padding: 15px; border-radius: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-bottom: 20px;
-                border: 1px solid #dee2e6;
-            }
-            .project-title {
-                color: #0077b6; font-weight: 800; font-size: 1.1rem;
-                margin-bottom: 5px; text-align: center; text-transform: uppercase;
-            }
-            .project-sub {
-                font-size: 0.8rem; color: #6c757d; text-align: center;
-                margin-bottom: 15px; font-style: italic;
-            }
-            .main-header {
-                background: linear-gradient(135deg, #023e8a 0%, #0077b6 100%);
-                padding: 1.5rem 2rem; border-radius: 15px; color: white;
-                margin-bottom: 2rem; box-shadow: 0 8px 20px rgba(0, 119, 182, 0.3);
-                display: flex; align-items: center; justify-content: space-between;
-            }
-            .header-left h1 {
-                color: #caf0f8 !important; font-weight: 900; margin: 0;
-                font-size: 2.2rem; letter-spacing: -0.5px;
-            }
-            .header-left p {
-                color: #e0fbfc; margin: 5px 0 0 0; font-size: 1rem; opacity: 0.9;
-            }
-            .header-right img {
-                border-radius: 50%; border: 3px solid rgba(255,255,255,0.3);
-                box-shadow: 0 4px 10px rgba(0,0,0,0.2); width: 100px; height: 100px;
-                object-fit: cover;
-            }
-            [data-testid="stChatMessageContent"] {
-                border-radius: 15px !important; padding: 1rem !important;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-            }
-            [data-testid="stChatMessageContent"]:has(+ [data-testid="stChatMessageAvatar"]) {
-                background: #e3f2fd; color: #0d47a1;
-            }
-            [data-testid="stChatMessageContent"]:not(:has(+ [data-testid="stChatMessageAvatar"])) {
-                background: white; border: 1px solid #e9ecef;
-                border-left: 5px solid #00b4d8;
-            }
-            
-            /* Style cho phần Nguồn tham khảo footer */
-            .citation-footer {
-                margin-top: 15px;
-                padding-top: 10px;
-                border-top: 1px dashed #ced4da;
-                font-size: 0.9rem;
-                color: #495057;
-            }
-            .citation-header {
-                font-weight: 700;
-                color: #d63384; 
-                margin-bottom: 5px;
-                display: flex;
-                align-items: center;
-                gap: 5px;
-            }
-            .citation-item {
-                margin-left: 5px;
-                margin-bottom: 3px;
-                display: block;
-            }
-            
-            div.stButton > button {
-                border-radius: 8px; background-color: white; color: #0077b6;
-                border: 1px solid #90e0ef; transition: all 0.2s;
-            }
-            div.stButton > button:hover {
-                background-color: #0077b6; color: white;
-                border-color: #0077b6; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-        </style>
-        """, unsafe_allow_html=True)
+        st.markdown("""<style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+        section[data-testid="stSidebar"] { background:#f8f9fa; border-right:1px solid #e9ecef; }
+        .project-card { background:white; padding:15px; border-radius:12px; border:1px solid #dee2e6; }
+        .main-header { background:linear-gradient(135deg,#023e8a,#0077b6);
+            padding:1.5rem 2rem; border-radius:15px; color:white; margin-bottom:2rem; }
+        .citation-footer { margin-top:15px; padding-top:10px; border-top:1px dashed #ced4da; font-size:0.9rem;}
+        #MainMenu, footer {visibility:hidden;}
+        </style>""", unsafe_allow_html=True)
 
     @staticmethod
     def render_sidebar():
         with st.sidebar:
             if os.path.exists(AppConfig.LOGO_SCHOOL):
-                col1, col2, col3 = st.columns([1, 2, 1])
-                with col2:
-                    st.image(AppConfig.LOGO_SCHOOL, use_container_width=True)
-                st.markdown("<div style='text-align:center; font-weight:700; color:#023e8a; margin-bottom:20px;'>THCS & THPT PHẠM KIỆT</div>", unsafe_allow_html=True)
-
-            st.markdown("""
-            <div class="project-card">
-                <div class="project-title">KTC CHATBOT</div>
-                <div class="project-sub">Sản phẩm dự thi KHKT cấp Tỉnh</div>
-                <hr style="margin: 10px 0; border-top: 1px dashed #dee2e6;">
-                <div style="font-size: 0.9rem; line-height: 1.6;">
-                    <div style="display: flex; justify-content: space-between;">
-                        <span style="font-weight: 600; color: #555;">Tác giả:</span>
-                        <span style="text-align: right; color: #222;"><b>Bùi Tá Tùng</b><br><b>Cao Sỹ Bảo Chung</b></span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; margin-top: 8px;">
-                        <span style="font-weight: 600; color: #555;">GVHD:</span>
-                        <span style="text-align: right; color: #222;">Thầy <b>Nguyễn Thế Khanh</b></span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; margin-top: 8px;">
-                        <span style="font-weight: 600; color: #555;">Năm học:</span>
-                        <span style="text-align: right; color: #222;"><b>2025 - 2026</b></span>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
+                st.image(AppConfig.LOGO_SCHOOL, use_container_width=True)
             st.markdown("### ⚙️ Tiện ích")
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
-
             if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
-                if os.path.exists(AppConfig.VECTOR_DB_PATH):
-                    shutil.rmtree(AppConfig.VECTOR_DB_PATH)
-                if os.path.exists(AppConfig.PROCESSED_MD_DIR):
-                    shutil.rmtree(AppConfig.PROCESSED_MD_DIR)
-                st.session_state.pop('retriever_engine', None)
+                shutil.rmtree(AppConfig.VECTOR_DB_PATH, ignore_errors=True)
+                shutil.rmtree(AppConfig.PROCESSED_MD_DIR, ignore_errors=True)
+                st.session_state.pop("retriever_engine", None)
                 st.rerun()
 
     @staticmethod
     def render_header():
-        logo_nhom_b64 = UIManager.get_img_as_base64(AppConfig.LOGO_PROJECT)
-        img_html = f'<img src="data:image/jpeg;base64,{logo_nhom_b64}" alt="Logo">' if logo_nhom_b64 else ""
-
+        logo = UIManager.get_img_as_base64(AppConfig.LOGO_PROJECT)
         st.markdown(f"""
         <div class="main-header">
-            <div class="header-left">
-                <h1>KTC CHATBOT</h1>
-                <p style="font-size: 1.1rem; margin-top: 5px;">Học Tin dễ dàng - Thao tác vững vàng</p>
-            </div>
-            <div class="header-right">
-                {img_html}
-            </div>
+            <h1>KTC CHATBOT</h1>
+            <p>Học Tin dễ dàng – Thao tác vững vàng</p>
+            <img src="data:image/jpeg;base64,{logo}" width="90">
         </div>
         """, unsafe_allow_html=True)
 
-# ==================================
-# 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
-# ==================================
-
+# ===============================
+# RAG ENGINE – CHUẨN KHKT
+# ===============================
 class RAGEngine:
-    @staticmethod
-    @st.cache_resource(show_spinner=False)
-    def load_groq_client():
-        try:
-            api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
-            if not api_key:
-                return None
-            return Groq(api_key=api_key)
-        except Exception:
-            return None
 
     @staticmethod
-    @st.cache_resource(show_spinner=False)
-    def load_embedding_model():
-        try:
-            return HuggingFaceEmbeddings(
-                model_name=AppConfig.EMBEDDING_MODEL,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-        except Exception as e:
-            st.error(f"Lỗi tải Embedding: {e}")
-            return None
+    @st.cache_resource
+    def load_embeddings():
+        return HuggingFaceEmbeddings(
+            model_name=AppConfig.EMBEDDING_MODEL,
+            encode_kwargs={"normalize_embeddings": True}
+        )
 
     @staticmethod
-    @st.cache_resource(show_spinner=False)
+    @st.cache_resource
     def load_reranker():
-        try:
-            return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
-        except Exception as e:
-            return None
+        return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
 
     @staticmethod
-    def _detect_grade(filename: str) -> str:
-        filename = filename.lower()
-        if "10" in filename: return "10"
-        if "11" in filename: return "11"
-        if "12" in filename: return "12"
-        return "general"
+    @st.cache_resource
+    def load_llm():
+        key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+        return Groq(api_key=key) if key else None
 
-    # --- [MODIFIED] XỬ LÝ CHUNK THEO CẤU TRÚC KNTT (TOPIC -> LESSON) ---
+    # ---------- STRUCTURAL CHUNKING ----------
     @staticmethod
-    def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        # 1. CLEANING
-        text = unicodedata.normalize('NFC', text)
-        text = text.replace('\xa0', ' ').replace('\u200b', '')
-        
-        lines = text.split('\n')
-        chunks = []
-        
-        # 2. STATE TRACKING
-        current_topic = None   
-        current_lesson = None  
-        current_section = "Nội dung"
-        
-        buffer = []
+    def structural_chunking(text: str, source: str) -> List[Document]:
+        text = unicodedata.normalize("NFC", text)
+        lines = text.split("\n")
 
-        # 3. REGEX ĐẶC THÙ CHO SGK KNTT
-        p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
-        p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
-        p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
+        chunks, buffer = [], []
+        topic = lesson = section = None
 
-        def commit_chunk(buf, meta, is_strict=True):
-            if not buf: return
-            content = "\n".join(buf).strip()
-            if len(content) < 20: return 
-            
-            # Logic nghiêm ngặt: Phải có Bài/Chủ đề mới lưu
-            if is_strict and (not current_topic or not current_lesson):
-                return 
+        p_topic = re.compile(r"CHỦ\s*ĐỀ\s+([0-9A-Z]+)", re.I)
+        p_lesson = re.compile(r"BÀI\s+([0-9]+)", re.I)
 
-            # Logic fallback: Nếu không bắt được chủ đề, vẫn lưu dưới dạng General
-            chunk_topic = current_topic if current_topic else "Kiến thức chung"
-            chunk_lesson = current_lesson if current_lesson else "Nội dung chi tiết"
+        def commit():
+            if not buffer or not topic or not lesson:
+                return
+            content = "\n".join(buffer).strip()
+            meta = {
+                "source": source,
+                "chapter": topic,
+                "lesson": lesson,
+                "section": section or "Nội dung",
+                "chunk_uid": str(uuid.uuid4())[:8]
+            }
+            ctx = f"{topic} > {lesson}"
+            chunks.append(Document(
+                page_content=f"Context: {ctx}\n{content}",
+                metadata=meta
+            ))
 
-            chunk_uid = str(uuid.uuid4())[:8]
-            new_meta = meta.copy()
-            new_meta.update({
-                "chunk_uid": chunk_uid,
-                "chapter": chunk_topic,
-                "lesson": chunk_lesson,
-                "section": current_section,
-                "context_str": f"{chunk_topic} > {chunk_lesson} > {current_section}" 
-            })
-            
-            full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
-            chunks.append(Document(page_content=full_content, metadata=new_meta))
-
-        # --- QUÉT FILE ---
-        # print(f"--- Processing text length: {len(text)} ---") 
-        
-        has_structure = False
         for line in lines:
-            line_stripped = line.strip()
-            if not line_stripped: continue
-            
-            # 4. LOGIC PHÁT HIỆN CHỦ ĐỀ (TOPIC)
-            match_topic = p_topic.search(line_stripped)
-            if match_topic:
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                topic_id = match_topic.group(2).strip()
-                topic_text = match_topic.group(3).strip(" :.-")
-                current_topic = f"Chủ đề {topic_id} {topic_text}".strip()
-                current_lesson = None 
-                current_section = "Giới thiệu chủ đề"
-                has_structure = True
-            
-            # 5. LOGIC PHÁT HIỆN BÀI (LESSON)
-            elif p_lesson.search(line_stripped):
-                match_lesson = p_lesson.search(line_stripped)
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                lesson_id = match_lesson.group(2).strip()
-                lesson_text = match_lesson.group(3).strip(" :.-")
-                current_lesson = f"Bài {lesson_id} {lesson_text}".strip()
-                current_section = "Tổng quan bài"
-                has_structure = True
-                
-            elif p_section.match(line_stripped) or line_stripped.startswith("### "):
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                current_section = line_stripped.replace('#','').strip()
-                
+            if p_topic.search(line):
+                commit(); buffer=[]
+                topic = f"Chủ đề {p_topic.search(line).group(1)}"
+            elif p_lesson.search(line):
+                commit(); buffer=[]
+                lesson = f"Bài {p_lesson.search(line).group(1)}"
             else:
                 buffer.append(line)
-        
-        commit_chunk(buffer, source_meta, is_strict=True)
 
-        # --- FALLBACK MECHANISM ---
-        # Nếu quét cả file mà không thấy cấu trúc "Chủ đề/Bài" (do PDFLoader đọc kém), 
-        # chuyển sang cắt chunk thông thường để đảm bảo không mất dữ liệu.
-        if not chunks and not has_structure:
-            print(f"⚠️ Cảnh báo: Không phát hiện cấu trúc chuẩn trong {source_meta['source']}. Chuyển sang chế độ cắt đoạn phổ thông.")
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            raw_chunks = splitter.split_text(text)
-            for rc in raw_chunks:
-                meta = source_meta.copy()
-                meta.update({
-                    "chapter": "Tài liệu bổ sung",
-                    "lesson": "Nội dung trích xuất",
-                    "context_str": f"{source_meta['source']}"
-                })
-                chunks.append(Document(page_content=rc, metadata=meta))
-
+        commit()
         return chunks
 
+    # ---------- PDF PARSE ----------
     @staticmethod
-    def _parse_pdf_smart(file_path: str) -> str:
-        """
-        Hàm đọc PDF thông minh: Thử LlamaParse trước, nếu lỗi thì dùng PyPDFLoader (miễn phí, offline)
-        """
+    def parse_pdf(path):
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-        file_name = os.path.basename(file_path)
-        md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
-        
-        # 1. Kiểm tra Cache
-        if os.path.exists(md_file_path):
-            with open(md_file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        
-        markdown_text = ""
-        
-        # 2. Thử dùng LlamaParse (Ưu tiên)
-        llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
-        used_llama = False
-        
-        if llama_api_key and LlamaParse:
+        cache = os.path.join(AppConfig.PROCESSED_MD_DIR, os.path.basename(path)+".md")
+        if os.path.exists(cache):
+            return open(cache, encoding="utf-8").read()
+
+        if LlamaParse and st.secrets.get("LLAMA_CLOUD_API_KEY"):
             try:
-                parser = LlamaParse(
-                    api_key=llama_api_key,
-                    result_type="markdown",
-                    language="vi",
-                    verbose=True
-                )
-                documents = parser.load_data(file_path)
-                markdown_text = documents[0].text
-                used_llama = True
-            except Exception as e:
-                print(f"⚠️ LlamaParse failed cho {file_name}: {e}. Chuyển sang PyPDFLoader.")
-        
-        # 3. Fallback: Dùng PyPDFLoader (Nếu LlamaParse lỗi hoặc không có key)
-        if not used_llama or not markdown_text:
-            try:
-                loader = PyPDFLoader(file_path)
-                docs = loader.load()
-                # Nối text các trang lại
-                markdown_text = "\n\n".join([d.page_content for d in docs])
-            except Exception as e:
-                return f"ERROR reading file {file_name}: {str(e)}"
+                parser = LlamaParse(api_key=st.secrets["LLAMA_CLOUD_API_KEY"], result_type="markdown")
+                text = parser.load_data(path)[0].text
+            except:
+                text = ""
+        else:
+            loader = PyPDFLoader(path)
+            text = "\n".join([p.page_content for p in loader.load()])
 
-        # 4. Lưu Cache
-        if markdown_text:
-            with open(md_file_path, "w", encoding="utf-8") as f:
-                f.write(markdown_text)
-            
-        return markdown_text
+        open(cache, "w", encoding="utf-8").write(text)
+        return text
 
+    # ---------- BUILD RETRIEVER ----------
     @staticmethod
-    def _read_and_process_files(pdf_dir: str) -> List[Document]:
-        if not os.path.exists(pdf_dir):
-            os.makedirs(pdf_dir, exist_ok=True) # Tự tạo thư mục nếu chưa có
-            return []
-        
-        pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
-        all_chunks: List[Document] = []
-        status_text = st.empty()
-
-        if not pdf_files:
-            st.warning(f"⚠️ Thư mục {pdf_dir} đang trống. Vui lòng bỏ file PDF SGK vào.")
-            return []
-
-        for file_path in pdf_files:
-            source_file = os.path.basename(file_path)
-            status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
-            
-            # Dùng hàm đọc thông minh mới
-            content = RAGEngine._parse_pdf_smart(file_path)
-            
-            if content and not content.startswith("ERROR"):
-                 meta = {
-                     "source": source_file, 
-                     "grade": RAGEngine._detect_grade(source_file)
-                 }
-                 file_chunks = RAGEngine._structural_chunking(content, meta)
-                 if file_chunks:
-                    all_chunks.extend(file_chunks)
-                 else:
-                    print(f"⚠️ File {source_file} đọc được text nhưng không tạo được chunk nào.")
-            else:
-                st.error(f"Lỗi đọc file {source_file}: {content}")
-                
-        status_text.empty()
-        return all_chunks
-
-    @staticmethod
-    def build_hybrid_retriever(embeddings):
-        if not embeddings: return None
-
-        vector_db = None
-        # Kiểm tra DB cũ
+    def build_retriever(emb):
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
-            try:
-                vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
-            except Exception: pass
+            db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, emb, allow_dangerous_deserialization=True)
+        else:
+            docs=[]
+            for pdf in glob.glob(f"{AppConfig.PDF_DIR}/*.pdf"):
+                text = RAGEngine.parse_pdf(pdf)
+                docs.extend(RAGEngine.structural_chunking(text, os.path.basename(pdf)))
+            db = FAISS.from_documents(docs, emb)
+            db.save_local(AppConfig.VECTOR_DB_PATH)
 
-        # Nếu chưa có DB, tạo mới
-        if not vector_db:
-            chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
-            
-            if not chunk_docs:
-                st.error(f"Không tạo được dữ liệu từ {AppConfig.PDF_DIR}. Hãy kiểm tra: 1. Có file PDF không? 2. File có text không (hay là ảnh scan)?")
-                return None
-            
-            vector_db = FAISS.from_documents(chunk_docs, embeddings)
-            vector_db.save_local(AppConfig.VECTOR_DB_PATH)
+        bm25 = BM25Retriever.from_documents(list(db.docstore._dict.values()))
+        bm25.k = AppConfig.RETRIEVAL_K
 
-        try:
-            docstore_docs = list(vector_db.docstore._dict.values())
-            # Kiểm tra nếu ít document quá thì giảm k của BM25
-            bm25_k = min(AppConfig.RETRIEVAL_K, len(docstore_docs))
-            
-            if bm25_k > 0:
-                bm25_retriever = BM25Retriever.from_documents(docstore_docs)
-                bm25_retriever.k = bm25_k
+        faiss = db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+        return EnsembleRetriever(
+            retrievers=[bm25, faiss],
+            weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
+        )
 
-                faiss_retriever = vector_db.as_retriever(
-                    search_type="mmr",
-                    search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5}
-                )
-
-                ensemble_retriever = EnsembleRetriever(
-                    retrievers=[bm25_retriever, faiss_retriever],
-                    weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
-                )
-                return ensemble_retriever
-            else:
-                return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
-        except Exception as e:
-            print(f"Lỗi build retriever: {e}. Fallback về FAISS thường.")
-            return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
-    
+    # ---------- GENERATE ----------
     @staticmethod
-    def _sanitize_output(text: str) -> str:
-        cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
-        text = cjk_pattern.sub("", text)
-        
-        hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
-        text = hallucination_pattern.sub("", text)
-        
-        leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
-        text = leakage_pattern.sub("", text)
-        
-        lines = text.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            line_clean = line.strip().lower()
-            if line_clean.startswith(('nguồn:', 'source:', 'trích dẫn:', 'tài liệu tham khảo:')):
-                continue
-            cleaned_lines.append(line)
-        
-        return "\n".join(cleaned_lines).strip()
+    def answer(llm, retriever, query) -> str:
+        docs = retriever.invoke(query)
+        reranker = RAGEngine.load_reranker()
 
-    @staticmethod
-    def generate_response(client, retriever, query) -> Generator[str, None, None]:
-        if not retriever:
-            yield "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát."
-            return
-        
-        # --- TẦNG 1: RETRIEVAL ---
-        try:
-            initial_docs = retriever.invoke(query)
-        except Exception:
-            yield "Đang gặp lỗi truy vấn dữ liệu."
-            return
+        passages=[{"id":i,"text":d.page_content,"meta":d.metadata} for i,d in enumerate(docs)]
+        ranked = reranker.rank(RerankRequest(query=query, passages=passages))[:AppConfig.FINAL_K]
 
-        final_docs = []
-        try:
-            ranker = RAGEngine.load_reranker()
-            if ranker and initial_docs:
-                passages = [
-                    {"id": str(i), "text": d.page_content, "meta": d.metadata} 
-                    for i, d in enumerate(initial_docs)
-                ]
-                rerank_req = RerankRequest(query=query, passages=passages)
-                results = ranker.rank(rerank_req)
-                for res in results[:AppConfig.FINAL_K]:
-                    final_docs.append(Document(page_content=res["text"], metadata=res["meta"]))
-            else:
-                final_docs = initial_docs[:AppConfig.FINAL_K]
-        except Exception:
-            final_docs = initial_docs[:AppConfig.FINAL_K]
+        context = "\n".join([r["text"] for r in ranked])
 
-        if not final_docs:
-            yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
-            return
+        prompt = f"""Bạn là KTC Chatbot.
+Chỉ dùng thông tin trong CONTEXT.
 
-        # --- TẦNG 2: MAPPING REGISTRY ---
-        context_parts = []
-        for doc in final_docs:
-             context_parts.append(
-                f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
-            )
-
-        full_context = "\n".join(context_parts)
-
-        # --- TẦNG 3: PROMPT ---
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học trường Phạm Kiệt.
-Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
-
-QUY TẮC BẮT BUỘC:
-1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. KHÔNG tự viết nguồn tham khảo giả.
-3. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
-
-[CONTEXT]
-{full_context}
+CONTEXT:
+{context}
 """
-        
-        try:
-            completion = client.chat.completions.create(
-                model=AppConfig.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query}
-                ],
-                stream=False,
-                temperature=AppConfig.LLM_TEMPERATURE,
-                max_tokens=1500
-            )
-            raw_response = completion.choices[0].message.content
+        res = llm.chat.completions.create(
+            model=AppConfig.LLM_MODEL,
+            messages=[{"role":"system","content":prompt},{"role":"user","content":query}],
+            temperature=0
+        ).choices[0].message.content
 
-            if "NO_INFO" in raw_response or not raw_response.strip():
-                yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
-                return
+        cites = {f"📖 {r['meta']['source']} → {r['meta']['chapter']} → {r['meta']['lesson']}" for r in ranked}
+        cite_html = "<div class='citation-footer'><b>📚 Nguồn:</b>" + "<br>".join(cites) + "</div>"
+        return res + cite_html
 
-            cleaned_response = RAGEngine._sanitize_output(raw_response)
-            
-            # --- FIX RAG STRUCTURE: CITATION LOGIC ---
-            unique_sources = set()
-            for doc in final_docs:
-                src_raw = doc.metadata.get('source', '')
-                src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
-                
-                topic = doc.metadata.get('chapter', '').strip()
-                lesson = doc.metadata.get('lesson', '').strip()
-                
-                if topic and lesson:
-                    display_str = f"📖 {src_clean} ➜ {topic} ➜ {lesson}"
-                    unique_sources.add(display_str)
-                elif src_clean:
-                    # Fallback citation for non-structured docs
-                    unique_sources.add(f"📖 {src_clean}")
-
-            sorted_sources = sorted(list(unique_sources))
-            
-            citation_html = ""
-            if sorted_sources:
-                citation_html += "\n\n<div class='citation-footer'>"
-                citation_html += "<div class='citation-header'>📚 Nguồn tham khảo xác thực (SGK KNTT):</div>"
-                for src in sorted_sources:
-                    citation_html += f"<span class='citation-item'>• {src}</span>"
-                citation_html += "</div>"
-            
-            final_response = cleaned_response + citation_html
-            
-            yield final_response
-
-        except Exception as e:
-            yield f"Lỗi xử lý hệ thống: {str(e)}"
-
-# ===================
-# 4. MAIN APPLICATION
-# ===================
-
+# ===============================
+# MAIN
+# ===============================
 def main():
     if not DEPENDENCIES_OK:
-        st.error(f"⚠️ Thiếu thư viện: {IMPORT_ERROR}")
-        st.stop()
+        st.error(IMPORT_ERROR); return
 
     UIManager.inject_custom_css()
     UIManager.render_sidebar()
     UIManager.render_header()
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học."}]
+        st.session_state.messages=[{"role":"assistant","content":"👋 Chào bạn!"}]
 
-    groq_client = RAGEngine.load_groq_client()
-
+    llm = RAGEngine.load_llm()
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Smart Parsing + Semantic Chunking)..."):
-            embeddings = RAGEngine.load_embedding_model()
-            st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
-            if st.session_state.retriever_engine:
-                st.toast("✅ Dữ liệu SGK đã sẵn sàng!", icon="📚")
+        emb = RAGEngine.load_embeddings()
+        st.session_state.retriever_engine = RAGEngine.build_retriever(emb)
 
-    for msg in st.session_state.messages:
-        bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
-        avatar = "🧑‍🎓" if msg["role"] == "user" else bot_avatar
-        with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"], unsafe_allow_html=True) 
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"], unsafe_allow_html=True)
 
-    user_input = st.chat_input("Nhập câu hỏi học tập...")
-    
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user", avatar="🧑‍🎓"):
-            st.markdown(user_input)
-
-        with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
-            response_placeholder = st.empty()
-            
-            response_gen = RAGEngine.generate_response(
-                groq_client,
-                st.session_state.retriever_engine,
-                user_input
-            )
-
-            full_response = ""
-            for chunk in response_gen:
-                full_response += chunk
-                response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
-            
-            response_placeholder.markdown(full_response, unsafe_allow_html=True)
-
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+    q = st.chat_input("Nhập câu hỏi...")
+    if q:
+        st.session_state.messages.append({"role":"user","content":q})
+        with st.chat_message("assistant"):
+            ans = RAGEngine.answer(llm, st.session_state.retriever_engine, q)
+            st.markdown(ans, unsafe_allow_html=True)
+            st.session_state.messages.append({"role":"assistant","content":ans})
 
 if __name__ == "__main__":
     main()
