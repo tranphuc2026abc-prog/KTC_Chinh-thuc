@@ -59,7 +59,7 @@ class AppConfig:
 
     # RAG Parameters
     RETRIEVAL_K = 30
-    FINAL_K = 5  # Giảm xuống 5 để tập trung độ chính xác
+    FINAL_K = 5 
 
     # Hybrid Search Weights
     BM25_WEIGHT = 0.4
@@ -207,6 +207,7 @@ class RAGEngine:
     @st.cache_resource(show_spinner=False)
     def load_groq_client():
         try:
+            # Ưu tiên lấy từ st.secrets (Cloud), sau đó đến biến môi trường
             api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
             if not api_key: return None
             return Groq(api_key=api_key)
@@ -232,25 +233,18 @@ class RAGEngine:
 
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        """
-        Cắt chunk thông minh có bắt số trang (Page Extraction)
-        """
         lines = text.split('\n')
         chunks = []
 
-        # Default Tracking
         current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung chi tiết"
-        current_page = "N/A" # Placeholder
+        current_page = "N/A"
 
         buffer = []
-
-        # Regex patterns
         p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
-        # Regex giả định bắt số trang nếu LlamaParse trả về dạng "--- Page 1 ---" hoặc "Trang 1"
         p_page = re.compile(r'^-+\s*(Page|Trang)\s*(\d+)\s*-+$', re.IGNORECASE)
 
         def clean_header(text): return text.replace('#', '').replace('*', '').strip()
@@ -260,7 +254,6 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 20: return 
 
-            # Create Deterministic UID based on content hash
             hash_input = (meta.get("source", "") + str(page) + content[:50]).encode('utf-8')
             chunk_hash = hashlib.sha256(hash_input).hexdigest()[:8]
 
@@ -278,7 +271,6 @@ class RAGEngine:
             line_stripped = line.strip()
             if not line_stripped: continue
 
-            # Detect Page Break
             if p_page.match(line_stripped):
                 commit_chunk(buffer, source_meta, current_page)
                 buffer = []
@@ -309,7 +301,7 @@ class RAGEngine:
         if os.path.exists(md_file_path):
             with open(md_file_path, "r", encoding="utf-8") as f: return f.read()
 
-        llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
+        llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY") or os.environ.get("LLAMA_CLOUD_API_KEY")
         if not llama_api_key: return "ERROR: Missing LLAMA_CLOUD_API_KEY"
 
         try:
@@ -354,13 +346,20 @@ class RAGEngine:
         return None
 
     # =========================================================================
-    # STRICT RAG GENERATION LOGIC - LEVEL 2 VERIFICATION
+    # DEBUGGED GENERATE RESPONSE (Sửa lỗi treo hệ thống)
     # =========================================================================
     @staticmethod
     def generate_response(client, retriever, query) -> Generator[str, None, None]:
+        # --- CHẨN ĐOÁN LỖI (Quan trọng) ---
         if not retriever:
-            yield "Hệ thống đang khởi tạo... vui lòng chờ giây lát."
+            if not os.path.exists(AppConfig.PDF_DIR) or not glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf")):
+                yield f"🛑 LỖI: Thư mục '{AppConfig.PDF_DIR}' đang trống hoặc chưa được tạo. Vui lòng upload ít nhất 1 file PDF."
+            elif not client:
+                 yield "🛑 LỖI: Không kết nối được LLM. Vui lòng kiểm tra GROQ_API_KEY."
+            else:
+                yield "⏳ Hệ thống đang xử lý dữ liệu lần đầu. Vui lòng bấm nút 'Cập nhật dữ liệu mới' bên trái và đợi 1-2 phút."
             return
+        # -----------------------------------
 
         # --- GIAI ĐOẠN 1: RETRIEVAL & RERANK ---
         initial_docs = retriever.invoke(query)
@@ -397,7 +396,7 @@ class RAGEngine:
             yield "Xin lỗi, hiện tại cơ sở dữ liệu SGK chưa có thông tin về vấn đề này."
             return
 
-        # --- GIAI ĐOẠN 2: XÂY DỰNG CONTEXT & REGISTRY (Level 2) ---
+        # --- GIAI ĐOẠN 2: XÂY DỰNG CONTEXT (Level 2) ---
         valid_uids = {} 
         context_parts = []
         
@@ -411,7 +410,7 @@ class RAGEngine:
             
             display_name = src_name if len(src_name) < 15 else src_name[:12] + "..."
             
-            # Tạo HTML Badge chuẩn KHKT: [Tên Sách > Bài > Trang]
+            # Tạo HTML Badge
             page_str = f" - Tr.{page}" if page != "N/A" else ""
             badge_html = f'<span class="citation-badge">📘 {display_name} > {lesson}{page_str}</span>'
             
@@ -421,15 +420,13 @@ class RAGEngine:
 
         full_context = "\n".join(context_parts)
 
-        # --- GIAI ĐOẠN 3: PROMPT KỸ THUẬT (Strict Verification) ---
+        # --- GIAI ĐOẠN 3: PROMPT KỸ THUẬT ---
         system_prompt = (
             "Bạn là Trợ lý AI giáo dục KHKT nghiêm ngặt.\n"
             "NHIỆM VỤ: Trả lời câu hỏi dựa trên Context được cung cấp.\n\n"
             "QUY TẮC TUYỆT ĐỐI (VI PHẠM SẼ BỊ TRỪ ĐIỂM):\n"
             "1. KHÔNG SÁNG TẠO: Chỉ dùng thông tin trong Context. Nếu không tìm thấy câu trả lời, in ra 'NO_INFO'.\n"
             "2. BẮT BUỘC TRÍCH DẪN: Mọi câu trả lời phải kết thúc bằng thẻ nguồn [ID:uid].\n"
-            "   - Sai: Python là ngôn ngữ lập trình.\n"
-            "   - Đúng: Python là ngôn ngữ lập trình [ID:12ab34cd].\n"
             "3. TRUNG THỰC: Không được bịa ID không có trong context.\n"
             "4. NGÔN NGỮ: Tiếng Việt phổ thông, sư phạm, dễ hiểu cho học sinh.\n\n"
             f"CONTEXT DỮ LIỆU:\n{full_context}"
@@ -439,13 +436,12 @@ class RAGEngine:
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
                 messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-                temperature=0.0, # Zero Temperature để triệt tiêu ảo giác
+                temperature=0.0,
                 stream=False
             )
             raw_response = completion.choices[0].message.content.strip()
 
-            # --- GIAI ĐOẠN 4: HẬU KIỂM (VALIDATION LAYER) ---
-            
+            # --- GIAI ĐOẠN 4: HẬU KIỂM ---
             if "NO_INFO" in raw_response:
                 yield "Dữ liệu SGK hiện tại chưa có thông tin chính xác về câu hỏi này."
                 return
@@ -453,12 +449,10 @@ class RAGEngine:
             pattern = r"\[ID:([a-fA-F0-9]+)\]"
             found_ids = re.findall(pattern, raw_response)
             
-            # LUẬT SẮT: KHÔNG CÓ NGUỒN = KHÔNG HIỂN THỊ
             if not found_ids:
                 yield "⚠️ Câu trả lời bị hệ thống chặn vì AI không trích xuất được nguồn chứng thực (Verification Fail)."
                 return
 
-            # Kiểm tra ID ảo
             valid_response = True
             invalid_ids = []
             for uid in found_ids:
@@ -467,16 +461,14 @@ class RAGEngine:
                     invalid_ids.append(uid)
             
             if not valid_response:
-                yield f"⚠️ Hệ thống phát hiện trích dẫn không hợp lệ ({', '.join(invalid_ids)}). Câu trả lời bị hủy bỏ để đảm bảo tính chính xác."
+                yield f"⚠️ Hệ thống phát hiện trích dẫn không hợp lệ ({', '.join(invalid_ids)}). Câu trả lời bị hủy bỏ."
                 return
 
-            # Thay thế ID bằng Badge đẹp
             def replace_with_badge(match):
                 uid_found = match.group(1)
                 return valid_uids.get(uid_found, "")
 
             final_display = re.sub(pattern, replace_with_badge, raw_response)
-            
             yield final_display
 
         except Exception as e:
@@ -484,7 +476,7 @@ class RAGEngine:
 
 
 # ===================
-# 4. MAIN APPLICATION
+# 4. MAIN APPLICATION (ĐÃ CẬP NHẬT KIỂM TRA LỖI)
 # ===================
 
 def main():
@@ -496,6 +488,30 @@ def main():
     UIManager.render_sidebar()
     UIManager.render_header()
 
+    # --- KIỂM TRA MÔI TRƯỜNG CHẠY ---
+    # Kiểm tra xem API Key đã có chưa (trong st.secrets hoặc os.environ)
+    missing_keys = []
+    has_groq = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+    has_llama = st.secrets.get("LLAMA_CLOUD_API_KEY") or os.environ.get("LLAMA_CLOUD_API_KEY")
+
+    if not has_groq: missing_keys.append("GROQ_API_KEY")
+    if not has_llama: missing_keys.append("LLAMA_CLOUD_API_KEY")
+
+    if missing_keys:
+        st.error("⛔ HỆ THỐNG CHƯA ĐƯỢC KÍCH HOẠT!")
+        st.warning(f"Thiếu các mã khóa sau: {', '.join(missing_keys)}")
+        st.info("👉 Vui lòng cấu hình 'secrets.toml' (nếu chạy Local) hoặc 'Streamlit Secrets' (nếu chạy Cloud).")
+        st.stop()
+    
+    # Kiểm tra File PDF
+    os.makedirs(AppConfig.PDF_DIR, exist_ok=True)
+    pdf_files = glob.glob(os.path.join(AppConfig.PDF_DIR, "*.pdf"))
+    if not pdf_files:
+        st.error(f"⚠️ Thư mục '{AppConfig.PDF_DIR}' đang trống!")
+        st.info("👉 Vui lòng upload ít nhất 1 file giáo trình PDF vào thư mục này để AI có dữ liệu.")
+        st.stop()
+
+    # --- KHỞI ĐỘNG HỆ THỐNG ---
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! Mình là KTC Chatbot. Hãy hỏi mình về nội dung SGK Tin học nhé!"}]
 
@@ -503,9 +519,14 @@ def main():
 
     # Khởi tạo Retriever
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số... (Lần đầu sẽ mất khoảng 1-2 phút)"):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
+            
+            # Kiểm tra lại lần nữa nếu build thất bại
+            if not st.session_state.retriever_engine:
+                 st.error("❌ Lỗi khởi tạo: Không thể đọc tài liệu PDF. Vui lòng kiểm tra lại Key LLAMA_CLOUD_API_KEY.")
+                 st.stop()
     
     # Hiển thị Chat
     bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
