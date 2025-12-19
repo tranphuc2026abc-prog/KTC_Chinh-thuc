@@ -232,7 +232,60 @@ class UIManager:
 # 3. LOGIC BACKEND - VERIFIABLE HYBRID RAG
 # ==================================
 
-@staticmethod
+class RAGEngine:
+    @staticmethod
+    @st.cache_resource(show_spinner=False)
+    def load_groq_client():
+        try:
+            api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+            if not api_key:
+                return None
+            return Groq(api_key=api_key)
+        except Exception:
+            return None
+
+    @staticmethod
+    @st.cache_resource(show_spinner=False)
+    def load_embedding_model():
+        try:
+            return HuggingFaceEmbeddings(
+                model_name=AppConfig.EMBEDDING_MODEL,
+                model_kwargs={'device': 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+        except Exception as e:
+            st.error(f"Lỗi tải Embedding: {e}")
+            return None
+
+    @staticmethod
+    @st.cache_resource(show_spinner=False)
+    def load_reranker():
+        try:
+            return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
+        except Exception as e:
+            return None
+
+    @staticmethod
+    def _detect_doc_type(source_name: str) -> str:
+        name_lower = source_name.lower()
+        if any(k in name_lower for k in ["on thi", "ôn thi"]):
+            return "Tài liệu ôn tập"
+        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
+            return "Tài liệu tham khảo"
+        if any(k in name_lower for k in ["sgk", "tin"]):
+            return "Tài liệu học tập"
+        return "Tài liệu tham khảo"
+
+    @staticmethod
+    def _detect_grade(filename: str) -> str:
+        filename = filename.lower()
+        if "10" in filename: return "10"
+        if "11" in filename: return "11"
+        if "12" in filename: return "12"
+        return "general"
+
+    # --- [UPDATE] LOGIC XỬ LÝ METADATA KHKT NGHIÊM NGẶT ---
+    @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
         lines = text.split('\n')
         chunks = []
@@ -247,7 +300,7 @@ class UIManager:
         
         buffer = []
 
-        # --- REGEX PATTERNS (GIỮ NGUYÊN) ---
+        # --- REGEX PATTERNS ---
         p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương)\s+([IVX0-9]+).*$', re.IGNORECASE)
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
