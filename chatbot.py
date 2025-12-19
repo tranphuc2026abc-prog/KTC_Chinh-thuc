@@ -459,20 +459,30 @@ class RAGEngine:
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo.
+        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo, 
+        bao gồm cả lỗi Instruction Leakage ("Hệ thống tự động...").
         """
         # 1. Loại bỏ tiếng Trung/Hàn/Nhật
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text)
         
         # 2. [CHỈNH SỬA CITATION] Cắt bỏ các ID/Citation do LLM tự bịa
-        # Regex này tìm các mẫu như [ID:123], [Nguồn 1], [Trích dẫn:...] và xóa chúng
         hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
         text = hallucination_pattern.sub("", text)
         
-        # 3. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
+        # 3. [FIX INSTRUCTION LEAKAGE] Loại bỏ dòng LLM "nhại" lại chỉ dẫn hệ thống
+        # Ví dụ: "Hệ thống tự động gắn nguồn: [1]" hoặc "Phần trích dẫn sẽ..."
+        leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
+        text = leakage_pattern.sub("", text)
+        
+        # 4. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
         lines = text.split('\n')
-        cleaned_lines = [line for line in lines if not line.strip().lower().startswith(('nguồn:', 'source:', 'trích dẫn:'))]
+        cleaned_lines = []
+        for line in lines:
+            line_clean = line.strip().lower()
+            if line_clean.startswith(('nguồn:', 'source:', 'trích dẫn:', 'tài liệu tham khảo:')):
+                continue
+            cleaned_lines.append(line)
         
         return "\n".join(cleaned_lines).strip()
 
@@ -516,16 +526,18 @@ class RAGEngine:
         full_context = "\n".join(context_parts)
 
         # --- TẦNG 3: PROMPT THIẾT QUÂN LUẬT (CITATION STRICT MODE) ---
-        # [CHỈNH SỬA CITATION] System Prompt cấm tuyệt đối LLM trích dẫn
+        # [FIX INSTRUCTION LEAKAGE] Xóa dòng "Hệ thống tự động..." để tránh LLM nhại lại.
+        # Chỉ giữ lệnh cấm (Negative Constraint).
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
 Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
 QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
 1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. TUYỆT ĐỐI KHÔNG tự viết nguồn tham khảo, KHÔNG tự bịa ID (ví dụ: [ID:...], [1]).
-3. Nhiệm vụ của bạn là tổng hợp nội dung. Phần trích dẫn nguồn sẽ do HỆ THỐNG TỰ ĐỘNG GẮN sau câu trả lời.
-4. Ngôn ngữ: Tiếng Việt sư phạm, trang trọng.
-5. Code Python phải đặt trong ```python ... ```.
+2. TUYỆT ĐỐI KHÔNG tự viết nguồn tham khảo dưới mọi hình thức.
+3. TUYỆT ĐỐI KHÔNG tự bịa ID (ví dụ: [ID:...], [1]).
+4. Nếu không có thông tin, hãy nói "Không tìm thấy thông tin trong tài liệu".
+5. Ngôn ngữ: Tiếng Việt sư phạm, trang trọng.
+6. Code Python phải đặt trong ```python ... ```.
 
 [CONTEXT]
 {full_context}
@@ -550,7 +562,7 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
 
             # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - STRICT MODE) ---
             
-            # 1. Vệ sinh văn bản (Loại bỏ ID ảo giác nếu có)
+            # 1. Vệ sinh văn bản (Loại bỏ ID ảo giác & Instruction Leakage)
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
             # 2. Xây dựng Footer trích dẫn chuẩn KHKT (Deterministic)
@@ -586,7 +598,6 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
                 
                 # 3. TRƯỜNG HỢP CÒN LẠI (Chương mặc định/rỗng):
                 # TUYỆT ĐỐI KHÔNG THÊM VÀO unique_sources.
-                # Thà không hiển thị citation còn hơn hiển thị "Chương mở đầu" hoặc "Tài liệu tham khảo".
                 else:
                     continue 
 
