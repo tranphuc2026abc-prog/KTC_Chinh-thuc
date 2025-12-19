@@ -6,6 +6,7 @@ import shutil
 import pickle
 import re
 import uuid
+import unicodedata # <--- THÊM MỚI: Để sửa lỗi font tiếng Việt
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
 
@@ -208,6 +209,8 @@ class UIManager:
             if st.button("🔄 Cập nhật dữ liệu mới", use_container_width=True):
                 if os.path.exists(AppConfig.VECTOR_DB_PATH):
                     shutil.rmtree(AppConfig.VECTOR_DB_PATH)
+                if os.path.exists(AppConfig.PROCESSED_MD_DIR): # Xóa luôn cache Markdown cũ
+                    shutil.rmtree(AppConfig.PROCESSED_MD_DIR)
                 st.session_state.pop('retriever_engine', None)
                 st.rerun()
 
@@ -266,6 +269,17 @@ class RAGEngine:
             return None
 
     @staticmethod
+    def _detect_doc_type(source_name: str) -> str:
+        name_lower = source_name.lower()
+        if any(k in name_lower for k in ["on thi", "ôn thi"]):
+            return "Tài liệu ôn tập"
+        if any(k in name_lower for k in ["python", "tham khảo", "reference"]):
+            return "Tài liệu tham khảo"
+        if any(k in name_lower for k in ["sgk", "tin"]):
+            return "Tài liệu học tập"
+        return "Tài liệu tham khảo"
+
+    @staticmethod
     def _detect_grade(filename: str) -> str:
         filename = filename.lower()
         if "10" in filename: return "10"
@@ -273,28 +287,30 @@ class RAGEngine:
         if "12" in filename: return "12"
         return "general"
 
-    # --- [UPDATE KHKT] BỘ LỌC CẤU TRÚC 2 CẤP (CHỦ ĐỀ -> BÀI) ---
+    # --- [ĐÃ CHỈNH SỬA] LOGIC CHUNKING + UNICODE FIX + REGEX MỚI ---
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
+        # 1. Chuẩn hóa Unicode (NFC) để sửa lỗi font tiếng Việt (Ví dụ: "B à i" -> "Bài")
+        text = unicodedata.normalize('NFC', text)
         lines = text.split('\n')
         chunks = []
         
-        # Danh sách từ khóa rác cần loại bỏ
+        # Danh sách lọc rác
         INVALID_MARKERS = {"Chương mở đầu", "Bài mở đầu", "Tổng quan chương", "", "None"}
         
-        # Khởi tạo (sẽ bị filter nếu không thay đổi)
-        current_chapter = "Chương mở đầu" 
+        # Biến trạng thái
+        current_chapter = "Chương mở đầu"
         current_lesson = "Bài mở đầu"
         current_section = "Nội dung"
         
         buffer = []
 
-        # --- REGEX ĐA NĂNG (Dành cho KNTT 10, 11, 12) ---
-        # 1. Bắt CHỦ ĐỀ hoặc CHƯƠNG (VD: Chủ đề 1, Chủ đề A, Chương I...)
-        # [IVX0-9A-Z]+ bắt được cả số La Mã, số thường và Chữ cái (A, B, F...)
-        p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương|CHỦ ĐỀ|Chủ đề)\s+([IVX0-9A-Z]+).*$', re.IGNORECASE)
+        # --- REGEX MỚI (Mạnh mẽ hơn) ---
+        # 1. Bắt CHƯƠNG hoặc CHỦ ĐỀ (Bắt cả số La Mã, số thường, chữ cái A, B, F...)
+        # Thêm \s* để chấp nhận khoảng trắng thừa: "Chủ  đề"
+        p_chapter = re.compile(r'^#*\s*\**\s*(CHƯƠNG|Chương|CHỦ\s*ĐỀ|Chủ\s*đề)\s+([IVX0-9A-Z]+).*$', re.IGNORECASE)
         
-        # 2. Bắt BÀI (VD: Bài 1, Bài 10...)
+        # 2. Bắt BÀI (Chấp nhận Bài 1, Bài 01...)
         p_lesson = re.compile(r'^#*\s*\**\s*(BÀI|Bài)\s+([0-9]+).*$', re.IGNORECASE)
         
         # 3. Bắt mục con
@@ -308,11 +324,11 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 50: return 
             
-            # --- CỔNG KIỂM SOÁT (GATEKEEPING) ---
-            # Chỉ cho phép lưu nếu đã xác định được Chủ đề/Chương HOẶC Bài
+            # --- BỘ LỌC KHKT ---
             is_valid_chapter = current_chapter not in INVALID_MARKERS
             is_valid_lesson = current_lesson not in INVALID_MARKERS
 
+            # Logic: Phải có ít nhất Chương/Chủ đề HOẶC Bài thì mới lưu
             if not (is_valid_chapter or is_valid_lesson):
                 return 
 
@@ -320,10 +336,10 @@ class RAGEngine:
             new_meta = meta.copy()
             new_meta.update({
                 "chunk_uid": chunk_uid,
-                "chapter": current_chapter, # Lưu tên Chủ đề
-                "lesson": current_lesson,   # Lưu tên Bài
+                "chapter": current_chapter,
+                "lesson": current_lesson,
                 "section": current_section,
-                "context_str": f"{current_chapter} > {current_lesson}" 
+                "context_str": f"{current_chapter} > {current_lesson} > {current_section}" 
             })
             
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
@@ -338,14 +354,17 @@ class RAGEngine:
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_chapter = clean_header(line_stripped)
-                current_lesson = "Tổng quan chương" # Reset Bài khi sang Chủ đề mới
-                print(f"✅ [Parsed] {source_meta.get('source')}: {current_chapter}")
+                # Reset bài khi qua chủ đề mới
+                current_lesson = "Tổng quan chương" 
+                current_section = "Giới thiệu"
+                print(f"✅ Bắt được: {current_chapter}")
             
             elif p_lesson.match(line_stripped):
                 commit_chunk(buffer, source_meta)
                 buffer = []
                 current_lesson = clean_header(line_stripped)
-                print(f"   👉 [Parsed] {current_lesson}")
+                current_section = "Tổng quan bài"
+                print(f"   👉 Bắt được: {current_lesson}")
                 
             elif p_section.match(line_stripped) or line_stripped.startswith("### "):
                 commit_chunk(buffer, source_meta)
@@ -387,7 +406,7 @@ class RAGEngine:
                 result_type="markdown",
                 language="vi",
                 verbose=True,
-                parsing_instruction="Đây là sách giáo khoa Tin học Kết nối tri thức. Hãy giữ cấu trúc: Chủ đề A, B... Bài 1, 2... và các bảng biểu."
+                parsing_instruction="Đây là tài liệu giáo khoa Tin học. Hãy giữ nguyên định dạng bảng biểu, code block và cấu trúc chương mục (#, ##, ###)."
             )
             documents = parser.load_data(file_path)
             markdown_text = documents[0].text
@@ -467,17 +486,22 @@ class RAGEngine:
     @staticmethod
     def _sanitize_output(text: str) -> str:
         """
-        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo.
+        Vệ sinh văn bản: Loại bỏ ký tự CJK và CẮT BỎ các ID giả mạo, 
+        bao gồm cả lỗi Instruction Leakage ("Hệ thống tự động...").
         """
+        # 1. Loại bỏ tiếng Trung/Hàn/Nhật
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text)
         
+        # 2. [CHỈNH SỬA CITATION] Cắt bỏ các ID/Citation do LLM tự bịa
         hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
         text = hallucination_pattern.sub("", text)
         
+        # 3. [FIX INSTRUCTION LEAKAGE] Loại bỏ dòng LLM "nhại" lại chỉ dẫn hệ thống
         leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
         text = leakage_pattern.sub("", text)
         
+        # 4. Xóa các dòng bắt đầu bằng "Nguồn:" hoặc "Source:" nếu LLM tự viết ở cuối
         lines = text.split('\n')
         cleaned_lines = []
         for line in lines:
@@ -517,7 +541,7 @@ class RAGEngine:
             yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
             return
 
-        # --- TẦNG 2: MAPPING REGISTRY ---
+        # --- TẦNG 2: MAPPING REGISTRY (Context Builder) ---
         context_parts = []
         for doc in final_docs:
              context_parts.append(
@@ -526,15 +550,17 @@ class RAGEngine:
 
         full_context = "\n".join(context_parts)
 
-        # --- TẦNG 3: PROMPT (STRICT) ---
+        # --- TẦNG 3: PROMPT ---
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học.
-Nhiệm vụ: Trả lời câu hỏi dựa trên [CONTEXT].
+Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
 
-QUY TẮC BẮT BUỘC:
+QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
 1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. KHÔNG tự viết nguồn tham khảo.
-3. KHÔNG tự bịa ID.
-4. Ngôn ngữ: Tiếng Việt sư phạm.
+2. TUYỆT ĐỐI KHÔNG tự viết nguồn tham khảo dưới mọi hình thức.
+3. TUYỆT ĐỐI KHÔNG tự bịa ID (ví dụ: [ID:...], [1]).
+4. Nếu không có thông tin, hãy nói "Không tìm thấy thông tin trong tài liệu".
+5. Ngôn ngữ: Tiếng Việt sư phạm, trang trọng.
+6. Code Python phải đặt trong ```python ... ```.
 
 [CONTEXT]
 {full_context}
@@ -557,36 +583,33 @@ QUY TẮC BẮT BUỘC:
                 yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
                 return
 
-            # --- TẦNG 4: HẬU XỬ LÝ (TRUY XUẤT NGUỒN 3 MỨC) ---
+            # --- TẦNG 4: HẬU XỬ LÝ (CITATION ENGINE - STRICT MODE) ---
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
+            # --- [CẬP NHẬT] Logic hiển thị Nguồn 3 mức (Sách -> Chủ đề -> Bài) ---
             unique_sources = set()
             for doc in final_docs:
-                # 1. Tên sách (Mức 1)
                 src_raw = doc.metadata.get('source', '')
                 src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
                 
-                # 2. Chủ đề / Chương (Mức 2)
                 chapter = doc.metadata.get('chapter', '').strip()
-                
-                # 3. Bài học (Mức 3)
                 lesson = doc.metadata.get('lesson', '').strip()
                 
-                # Lọc rác
                 invalid_chapters = ["Chương mở đầu", "", "None"]
                 invalid_lessons = ["Bài mở đầu", "Tổng quan chương", "", "None"]
                 
                 is_valid_chapter = chapter not in invalid_chapters
                 is_valid_lesson = lesson not in invalid_lessons
                 
-                # LOGIC HIỂN THỊ 3 MỨC: SÁCH -> CHỦ ĐỀ -> BÀI
+                # Logic hiển thị:
                 if is_valid_chapter and is_valid_lesson:
                     display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
                     unique_sources.add(display_str)
                 elif is_valid_chapter:
                     display_str = f"📖 {src_clean} ➜ {chapter}"
                     unique_sources.add(display_str)
-                # Nếu không có chương/bài hợp lệ -> Bỏ qua
+                else:
+                    continue 
 
             sorted_sources = sorted(list(unique_sources))
             
@@ -599,6 +622,7 @@ QUY TẮC BẮT BUỘC:
                 citation_html += "</div>"
             
             final_response = cleaned_response + citation_html
+            
             yield final_response
 
         except Exception as e:
@@ -618,7 +642,7 @@ def main():
     UIManager.render_header()
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học (10, 11, 12)."}]
+        st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học."}]
 
     groq_client = RAGEngine.load_groq_client()
 
