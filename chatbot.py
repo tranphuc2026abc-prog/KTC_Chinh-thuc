@@ -554,7 +554,8 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
             cleaned_response = RAGEngine._sanitize_output(raw_response)
             
             # 2. Xây dựng Footer trích dẫn chuẩn KHKT (Deterministic)
-            # [CHỈNH SỬA CITATION] Logic trích dẫn hệ thống, không phụ thuộc LLM
+            # [CHỈNH SỬA CITATION – KHKT] Logic trích dẫn hệ thống, KHẮC PHỤC LỖI FALLBACK MƠ HỒ
+            # TUYỆT ĐỐI KHÔNG dùng _detect_doc_type và KHÔNG fallback về dạng chung chung.
             
             unique_sources = set()
             for doc in final_docs:
@@ -564,19 +565,31 @@ QUY TẮC BẮT BUỘC (TUÂN THỦ 100%):
                 chapter = doc.metadata.get('chapter', '').strip()
                 lesson = doc.metadata.get('lesson', '').strip()
                 
-                is_default_chapter = (chapter in ["Chương mở đầu", "", "None"])
-                is_default_lesson = (lesson in ["Bài mở đầu", "Tổng quan chương", "", "None"])
+                # Danh sách các định danh mặc định cần LOẠI BỎ (Filter out defaults)
+                # Các chunk này chỉ mang tính chất metadata ban đầu, chưa được parse vào chương/bài cụ thể
+                invalid_chapters = ["Chương mở đầu", "", "None"]
+                invalid_lessons = ["Bài mở đầu", "Tổng quan chương", "", "None"]
                 
-                if not is_default_chapter and not is_default_lesson:
+                is_valid_chapter = chapter not in invalid_chapters
+                is_valid_lesson = lesson not in invalid_lessons
+                
+                # Logic hiển thị nghiêm ngặt:
+                # 1. Ưu tiên cao nhất: Có cả Chương và Bài cụ thể
+                if is_valid_chapter and is_valid_lesson:
                     display_str = f"📖 {src_clean} ➜ {chapter} ➜ {lesson}"
-                elif not is_default_chapter and is_default_lesson:
-                    display_str = f"📖 {src_clean} ➜ {chapter}"
-                else:
-                    doc_type = RAGEngine._detect_doc_type(src_clean)
-                    display_str = f"📖 {src_clean} ➜ {doc_type}"
+                    unique_sources.add(display_str)
                 
-                unique_sources.add(display_str)
-            
+                # 2. Ưu tiên nhì: Chỉ có Chương cụ thể (Bài có thể là giới thiệu/tổng quan)
+                elif is_valid_chapter and not is_valid_lesson:
+                    display_str = f"📖 {src_clean} ➜ {chapter}"
+                    unique_sources.add(display_str)
+                
+                # 3. TRƯỜNG HỢP CÒN LẠI (Chương mặc định/rỗng):
+                # TUYỆT ĐỐI KHÔNG THÊM VÀO unique_sources.
+                # Thà không hiển thị citation còn hơn hiển thị "Chương mở đầu" hoặc "Tài liệu tham khảo".
+                else:
+                    continue 
+
             sorted_sources = sorted(list(unique_sources))
             
             citation_html = ""
