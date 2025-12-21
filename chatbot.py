@@ -1,4 +1,3 @@
-from advanced_pdf_processor import process_pdf_advanced
 import os
 import glob
 import base64
@@ -20,7 +19,10 @@ try:
         from llama_parse import LlamaParse 
     except ImportError:
         LlamaParse = None
-        
+    
+    # 🔥 NEW: PyMuPDF for advanced processing
+    import fitz  # PyMuPDF
+    
     from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
@@ -261,6 +263,271 @@ class UIManager:
         </div>
         """, unsafe_allow_html=True)
 
+# ============================================================
+# 🔥 ADVANCED PDF PROCESSOR - INTEGRATED MODULE
+# ============================================================
+
+class AdvancedPDFProcessor:
+    """
+    Advanced processor for Vietnamese textbook PDFs with hierarchical structure.
+    Implements context-aware chunking with proper metadata tracking.
+    
+    This replaces the naive RecursiveCharacterTextSplitter approach.
+    """
+    
+    # Noise patterns to filter out
+    NOISE_PATTERNS = [
+        r'KẾT\s+NỐI\s+TRI\s+THỨC\s+VỚI\s+CUỘC\s+SỐNG',
+        r'TIN\s+HỌC\s+\d+',
+        r'CHƯƠNG\s+TRÌNH\s+GIÁO\s+DỤC',
+        r'PHÂN\s+PHỐI\s+CHƯƠNG\s+TRÌNH',
+        r'^\s*\d+\s*$',  # Isolated page numbers
+    ]
+    
+    # Structural patterns for Vietnamese textbooks
+    TOPIC_PATTERN = re.compile(
+        r'(?:^|\n)\s*CHỦ\s+ĐỀ\s+(\d+)[\.:\s]*(.*?)(?:\n|$)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    
+    LESSON_PATTERN = re.compile(
+        r'(?:^|\n)\s*BÀI\s+(\d+)[\.:\s]*(.*?)(?:\n|$)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """Normalize Vietnamese text (NFC normalization, whitespace cleanup)."""
+        text = unicodedata.normalize('NFC', text)
+        text = text.replace('\xa0', ' ').replace('\u200b', '')
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        return text.strip()
+    
+    @staticmethod
+    def is_noise(text: str) -> bool:
+        """Check if a text line is noise (header/footer/page number)."""
+        text_clean = text.strip()
+        
+        if len(text_clean) < 3:
+            return True
+        
+        for pattern in AdvancedPDFProcessor.NOISE_PATTERNS:
+            if re.search(pattern, text_clean, re.IGNORECASE):
+                return True
+        
+        if text_clean.isdigit() and len(text_clean) <= 3:
+            return True
+        
+        return False
+    
+    @staticmethod
+    def extract_page_text(page) -> Tuple[str, List[str]]:
+        """Extract clean text from a PDF page, filtering noise."""
+        text = page.get_text()
+        text = AdvancedPDFProcessor.normalize_text(text)
+        
+        lines = text.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not AdvancedPDFProcessor.is_noise(line):
+                clean_lines.append(line)
+        
+        full_text = '\n'.join(clean_lines)
+        return full_text, clean_lines
+    
+    @staticmethod
+    def detect_topic(text: str) -> Optional[str]:
+        """Detect 'Chủ đề' (Topic/Chapter) from text."""
+        match = AdvancedPDFProcessor.TOPIC_PATTERN.search(text)
+        if match:
+            topic_num = match.group(1).strip()
+            topic_name = match.group(2).strip()
+            return f"Chủ đề {topic_num}. {topic_name}"
+        return None
+    
+    @staticmethod
+    def detect_lesson(text: str) -> Optional[str]:
+        """Detect 'Bài' (Lesson) from text."""
+        match = AdvancedPDFProcessor.LESSON_PATTERN.search(text)
+        if match:
+            lesson_num = match.group(1).strip()
+            lesson_name = match.group(2).strip()
+            return f"Bài {lesson_num}. {lesson_name}"
+        return None
+    
+    @staticmethod
+    def split_into_semantic_chunks(text: str, max_chunk_size: int = 1000) -> List[str]:
+        """Split text into semantic chunks respecting paragraph boundaries."""
+        if len(text) <= max_chunk_size:
+            return [text]
+        
+        paragraphs = re.split(r'\n\n+', text)
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        
+        for para in paragraphs:
+            para_len = len(para)
+            
+            if para_len > max_chunk_size:
+                if current_chunk:
+                    chunks.append('\n\n'.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                
+                sentences = re.split(r'([.!?]+\s+)', para)
+                temp_chunk = ""
+                for sent in sentences:
+                    if len(temp_chunk) + len(sent) > max_chunk_size and temp_chunk:
+                        chunks.append(temp_chunk.strip())
+                        temp_chunk = sent
+                    else:
+                        temp_chunk += sent
+                
+                if temp_chunk.strip():
+                    chunks.append(temp_chunk.strip())
+                    
+            elif current_length + para_len + 2 > max_chunk_size:
+                if current_chunk:
+                    chunks.append('\n\n'.join(current_chunk))
+                current_chunk = [para]
+                current_length = para_len
+            else:
+                current_chunk.append(para)
+                current_length += para_len + 2
+        
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+        
+        return chunks
+    
+    @staticmethod
+    def process_pdf_advanced(pdf_path: str, chunk_size: int = 1000, overlap: int = 100) -> List[Document]:
+        """
+        🔥 MAIN PROCESSING FUNCTION: Extract PDF with context-aware hierarchical chunking.
+        
+        Algorithm:
+        1. Iterate through all PDF pages
+        2. Extract and clean text from each page
+        3. Maintain state machine for current topic/lesson context
+        4. Detect structural changes (new topic, new lesson)
+        5. Create chunks with proper metadata enrichment
+        
+        Returns:
+            List of LangChain Document objects with enriched metadata
+        """
+        doc = fitz.open(pdf_path)
+        source_name = os.path.basename(pdf_path)
+        documents = []
+        
+        # State machine variables
+        current_topic = None
+        current_lesson = None
+        content_buffer = []
+        buffer_page_start = 0
+        
+        print(f"📚 Processing: {source_name}")
+        print(f"📄 Total pages: {len(doc)}")
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            page_text, lines = AdvancedPDFProcessor.extract_page_text(page)
+            
+            if not page_text.strip():
+                continue
+            
+            # Detect structural changes on this page
+            detected_topic = AdvancedPDFProcessor.detect_topic(page_text)
+            detected_lesson = AdvancedPDFProcessor.detect_lesson(page_text)
+            
+            # STATE TRANSITION: New Topic detected
+            if detected_topic:
+                if content_buffer:
+                    AdvancedPDFProcessor._commit_buffer_to_documents(
+                        documents, content_buffer, current_topic, current_lesson,
+                        buffer_page_start, page_num - 1, source_name, chunk_size, overlap
+                    )
+                    content_buffer = []
+                
+                current_topic = detected_topic
+                current_lesson = None
+                buffer_page_start = page_num
+                print(f"  📌 Page {page_num + 1}: Detected {current_topic}")
+            
+            # STATE TRANSITION: New Lesson detected
+            if detected_lesson:
+                if content_buffer:
+                    AdvancedPDFProcessor._commit_buffer_to_documents(
+                        documents, content_buffer, current_topic, current_lesson,
+                        buffer_page_start, page_num - 1, source_name, chunk_size, overlap
+                    )
+                    content_buffer = []
+                
+                current_lesson = detected_lesson
+                buffer_page_start = page_num
+                print(f"    📖 Page {page_num + 1}: Detected {current_lesson}")
+            
+            content_buffer.append({'text': page_text, 'page': page_num})
+        
+        # Commit remaining buffer
+        if content_buffer:
+            AdvancedPDFProcessor._commit_buffer_to_documents(
+                documents, content_buffer, current_topic, current_lesson,
+                buffer_page_start, len(doc) - 1, source_name, chunk_size, overlap
+            )
+        
+        doc.close()
+        print(f"✅ Generated {len(documents)} context-aware chunks")
+        return documents
+    
+    @staticmethod
+    def _commit_buffer_to_documents(
+        documents: List[Document],
+        buffer: List[Dict],
+        topic: Optional[str],
+        lesson: Optional[str],
+        page_start: int,
+        page_end: int,
+        source_name: str,
+        chunk_size: int,
+        overlap: int
+    ):
+        """Convert accumulated buffer into Document objects with metadata."""
+        if not buffer:
+            return
+        
+        full_text = '\n\n'.join([item['text'] for item in buffer])
+        representative_page = page_start + (page_end - page_start) // 2
+        
+        chunks = AdvancedPDFProcessor.split_into_semantic_chunks(full_text, chunk_size)
+        
+        # Create overlapping chunks
+        final_chunks = []
+        for i, chunk in enumerate(chunks):
+            if i > 0 and overlap > 0:
+                prev_chunk = chunks[i - 1]
+                overlap_text = prev_chunk[-overlap:] if len(prev_chunk) > overlap else prev_chunk
+                chunk = overlap_text + '\n' + chunk
+            final_chunks.append(chunk)
+        
+        # Create Document objects
+        for chunk_idx, chunk_text in enumerate(final_chunks):
+            metadata = {
+                'source': source_name,
+                'page': representative_page + 1,  # 1-indexed
+                'chapter': topic if topic else 'Nội dung chung',
+                'lesson': lesson if lesson else 'Phần giới thiệu',
+                'chunk_index': chunk_idx,
+                'total_chunks': len(final_chunks),
+                'page_range': f"{page_start + 1}-{page_end + 1}"
+            }
+            
+            doc = Document(page_content=chunk_text.strip(), metadata=metadata)
+            documents.append(doc)
+
 # ==================================
 # 3. LOGIC BACKEND - ROBUST RAG ENGINE
 # ==================================
@@ -307,142 +574,17 @@ class RAGEngine:
         return "general"
 
     @staticmethod
-    def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        text = unicodedata.normalize('NFC', text)
-        text = text.replace('\xa0', ' ').replace('\u200b', '')
-        
-        lines = text.split('\n')
-        chunks = []
-        
-        current_topic = None   
-        current_lesson = None  
-        current_section = "Nội dung"
-        
-        buffer = []
-
-        p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
-        p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
-        p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
-
-        def commit_chunk(buf, meta, is_strict=True):
-            if not buf: return
-            content = "\n".join(buf).strip()
-            if len(content) < 20: return 
-            
-            if is_strict and (not current_topic or not current_lesson):
-                return 
-
-            chunk_topic = current_topic if current_topic else "Kiến thức chung"
-            chunk_lesson = current_lesson if current_lesson else "Nội dung chi tiết"
-
-            chunk_uid = str(uuid.uuid4())[:8]
-            new_meta = meta.copy()
-            new_meta.update({
-                "chunk_uid": chunk_uid,
-                "chapter": chunk_topic,
-                "lesson": chunk_lesson,
-                "section": current_section,
-                "context_str": f"{chunk_topic} > {chunk_lesson} > {current_section}" 
-            })
-            
-            full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
-            chunks.append(Document(page_content=full_content, metadata=new_meta))
-
-        has_structure = False
-        for line in lines:
-            line_stripped = line.strip()
-            if not line_stripped: continue
-            
-            match_topic = p_topic.search(line_stripped)
-            if match_topic:
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                topic_id = match_topic.group(2).strip()
-                topic_text = match_topic.group(3).strip(" :.-")
-                current_topic = f"Chủ đề {topic_id} {topic_text}".strip()
-                current_lesson = None 
-                current_section = "Giới thiệu chủ đề"
-                has_structure = True
-            
-            elif p_lesson.search(line_stripped):
-                match_lesson = p_lesson.search(line_stripped)
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                lesson_id = match_lesson.group(2).strip()
-                lesson_text = match_lesson.group(3).strip(" :.-")
-                current_lesson = f"Bài {lesson_id} {lesson_text}".strip()
-                current_section = "Tổng quan bài"
-                has_structure = True
-                
-            elif p_section.match(line_stripped) or line_stripped.startswith("### "):
-                commit_chunk(buffer, source_meta, is_strict=True)
-                buffer = []
-                current_section = line_stripped.replace('#','').strip()
-                
-            else:
-                buffer.append(line)
-        
-        commit_chunk(buffer, source_meta, is_strict=True)
-
-        if not chunks and not has_structure:
-            print(f"⚠️ Cảnh báo: Không phát hiện cấu trúc chuẩn trong {source_meta['source']}. Chuyển sang chế độ cắt đoạn phổ thông.")
-            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            raw_chunks = splitter.split_text(text)
-            for rc in raw_chunks:
-                meta = source_meta.copy()
-                meta.update({
-                    "chapter": "Tài liệu bổ sung",
-                    "lesson": "Nội dung trích xuất",
-                    "context_str": f"{source_meta['source']}"
-                })
-                chunks.append(Document(page_content=rc, metadata=meta))
-
-        return chunks
-
-    @staticmethod
-    def _parse_pdf_smart(file_path: str) -> str:
-        os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
-        file_name = os.path.basename(file_path)
-        md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
-        
-        if os.path.exists(md_file_path):
-            with open(md_file_path, "r", encoding="utf-8") as f:
-                return f.read()
-        
-        markdown_text = ""
-        llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
-        used_llama = False
-        
-        if llama_api_key and LlamaParse:
-            try:
-                parser = LlamaParse(
-                    api_key=llama_api_key,
-                    result_type="markdown",
-                    language="vi",
-                    verbose=True
-                )
-                documents = parser.load_data(file_path)
-                markdown_text = documents[0].text
-                used_llama = True
-            except Exception as e:
-                print(f"⚠️ LlamaParse failed cho {file_name}: {e}. Chuyển sang PyPDFLoader.")
-        
-        if not used_llama or not markdown_text:
-            try:
-                loader = PyPDFLoader(file_path)
-                docs = loader.load()
-                markdown_text = "\n\n".join([d.page_content for d in docs])
-            except Exception as e:
-                return f"ERROR reading file {file_name}: {str(e)}"
-
-        if markdown_text:
-            with open(md_file_path, "w", encoding="utf-8") as f:
-                f.write(markdown_text)
-            
-        return markdown_text
-
-    @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
+        """
+        🔥 UPGRADED: Uses advanced context-aware PDF processing.
+        
+        This method now directly calls AdvancedPDFProcessor which implements:
+        - Hierarchical structure detection (Chủ đề, Bài)
+        - State machine for context tracking
+        - Noise reduction (headers, footers, page numbers)
+        - Semantic chunking at paragraph boundaries
+        - Full metadata enrichment (chapter, lesson, page)
+        """
         if not os.path.exists(pdf_dir):
             os.makedirs(pdf_dir, exist_ok=True)
             return []
@@ -457,24 +599,30 @@ class RAGEngine:
 
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
-            status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
+            status_text.text(f"🧠 Đang xử lý cấu trúc tri thức nâng cao: {source_file}...")
             
-            content = RAGEngine._parse_pdf_smart(file_path)
-            
-            if content and not content.startswith("ERROR"):
-                 meta = {
-                     "source": source_file, 
-                     "grade": RAGEngine._detect_grade(source_file)
-                 }
-                 file_chunks = RAGEngine._structural_chunking(content, meta)
-                 if file_chunks:
+            try:
+                # 🔥 Use advanced processor
+                file_chunks = AdvancedPDFProcessor.process_pdf_advanced(
+                    pdf_path=file_path,
+                    chunk_size=1000,
+                    overlap=100
+                )
+                
+                if file_chunks:
                     all_chunks.extend(file_chunks)
-                 else:
-                    print(f"⚠️ File {source_file} đọc được text nhưng không tạo được chunk nào.")
-            else:
-                st.error(f"Lỗi đọc file {source_file}: {content}")
+                    print(f"✅ {source_file}: {len(file_chunks)} chunks created with full metadata")
+                else:
+                    print(f"⚠️ File {source_file} không tạo được chunk nào.")
+                    
+            except Exception as e:
+                st.error(f"❌ Lỗi xử lý file {source_file}: {str(e)}")
+                print(f"Error details: {e}")
+                import traceback
+                traceback.print_exc()
                 
         status_text.empty()
+        print(f"📊 Total chunks created: {len(all_chunks)}")
         return all_chunks
 
     @staticmethod
@@ -549,74 +697,52 @@ class RAGEngine:
         for msg in messages[-6:]:  # Last 3 turns (6 messages)
             role = "Học sinh" if msg["role"] == "user" else "Trợ lý"
             content = re.sub(r'<[^>]+>', '', msg["content"])
-            formatted.append(f"{role}: {content}")
+            formatted.append(f"{role}: {content[:200]}")
         return "\n".join(formatted)
 
     @staticmethod
-    def _apply_synthetic_scores(docs: List[Document]) -> List[Tuple[Document, float]]:
-        """🔥 CRITICAL FIX: Apply synthetic decay scoring when Reranker fails"""
-        scored = []
-        for idx, doc in enumerate(docs[:AppConfig.FINAL_K]):
-            synthetic_score = max(
-                AppConfig.SYNTHETIC_BASE_SCORE - (idx * AppConfig.SYNTHETIC_DECAY),
-                AppConfig.RERANK_THRESHOLD + 0.01  # Always above threshold
-            )
-            scored.append((doc, synthetic_score))
-        return scored
+    def generate_response(client, retriever, query: str, chat_history: List[Dict]) -> Tuple[str, List[Tuple[Document, float]]]:
+        if not client or not retriever:
+            return "❌ Hệ thống chưa sẵn sàng. Vui lòng kiểm tra API Key và dữ liệu SGK.", []
 
-    @staticmethod
-    def generate_response(client, retriever, query, chat_history: List[Dict]) -> Tuple[str, List[Tuple[Document, float]]]:
-        """
-        Returns: (response_text, [(doc, score), ...])
-        🔥 With ROBUST fallback scoring - NEVER returns 0% confidence
-        """
-        if not retriever:
-            return "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát.", []
-        
         # --- TẦNG 1: RETRIEVAL ---
         try:
-            initial_docs = retriever.invoke(query)
-        except Exception:
-            return "Đang gặp lỗi truy vấn dữ liệu.", []
+            raw_docs = retriever.invoke(query)
+            if not raw_docs:
+                return "🔍 Không tìm thấy thông tin liên quan trong SGK.", []
+        except Exception as e:
+            return f"Lỗi truy vấn dữ liệu: {str(e)}", []
 
-        # --- TẦNG 2: INTELLIGENT RERANKING + FALLBACK 🔥 ---
+        # --- TẦNG 2: RERANKING ---
+        reranker = RAGEngine.load_reranker()
         scored_docs = []
-        reranker_failed = False
-        
-        try:
-            ranker = RAGEngine.load_reranker()
-            if ranker and initial_docs:
+
+        if reranker:
+            try:
                 passages = [
-                    {"id": str(i), "text": d.page_content, "meta": d.metadata} 
-                    for i, d in enumerate(initial_docs)
+                    {"id": idx, "text": doc.page_content, "meta": doc.metadata}
+                    for idx, doc in enumerate(raw_docs)
                 ]
                 rerank_req = RerankRequest(query=query, passages=passages)
-                results = ranker.rank(rerank_req)
+                rerank_results = reranker.rerank(rerank_req)
                 
-                # Try to extract scores
-                for res in results:
-                    score = res.get("score", None)
-                    if score is None or score == 0:
-                        reranker_failed = True
-                        break
-                    if score >= AppConfig.RERANK_THRESHOLD:
-                        doc = Document(page_content=res["text"], metadata=res["meta"])
-                        scored_docs.append((doc, score))
-                
-                scored_docs = scored_docs[:AppConfig.FINAL_K]
-            else:
-                reranker_failed = True
-        except Exception as e:
-            print(f"⚠️ Reranker error: {e}. Activating synthetic scoring.")
-            reranker_failed = True
-
-        # 🔥 SOFT FALLBACK: Apply synthetic scores if Reranker failed
-        if reranker_failed or not scored_docs:
-            print("🔥 Applying synthetic decay scoring (Reranker unavailable)")
-            scored_docs = RAGEngine._apply_synthetic_scores(initial_docs)
+                scored_docs = [
+                    (raw_docs[res["id"]], res["score"])
+                    for res in rerank_results[:AppConfig.FINAL_K]
+                    if res["score"] >= AppConfig.RERANK_THRESHOLD
+                ]
+            except Exception as e:
+                print(f"⚠️ Reranker failed: {e}. Using synthetic scores.")
+                reranker = None
+        
+        if not reranker or not scored_docs:
+            scored_docs = [
+                (doc, AppConfig.SYNTHETIC_BASE_SCORE - (i * AppConfig.SYNTHETIC_DECAY))
+                for i, doc in enumerate(raw_docs[:AppConfig.FINAL_K])
+            ]
 
         if not scored_docs:
-            return "Không tìm thấy thông tin đủ tin cậy trong SGK hiện có. Hãy thử diễn đạt câu hỏi khác.", []
+            return "🔍 Không tìm thấy thông tin liên quan trong SGK.", []
 
         # --- TẦNG 3: CONTEXT BUILDING ---
         context_parts = []
@@ -722,7 +848,7 @@ def main():
     groq_client = RAGEngine.load_groq_client()
 
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Smart Parsing + Semantic Chunking)..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Advanced Context-Aware Processing)..."):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
             if st.session_state.retriever_engine:
