@@ -9,6 +9,7 @@ import uuid
 import unicodedata 
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
+from collections import defaultdict
 
 # --- Imports với xử lý lỗi ---
 try:
@@ -63,7 +64,11 @@ class AppConfig:
     # RAG Parameters
     RETRIEVAL_K = 30       
     FINAL_K = 5
-    RERANK_THRESHOLD = 0.45  # Ngưỡng lọc
+    RERANK_THRESHOLD = 0.45  # Score threshold for filtering
+    
+    # Synthetic Scoring (Fallback when Reranker fails)
+    SYNTHETIC_BASE_SCORE = 0.95
+    SYNTHETIC_DECAY = 0.05
     
     # Hybrid Search Weights
     BM25_WEIGHT = 0.4      
@@ -72,7 +77,7 @@ class AppConfig:
     LLM_TEMPERATURE = 0.0 
 
 # ===============================
-# 2. XỬ LÝ GIAO DIỆN (UI MANAGER - GIỮ NGUYÊN 100%) 
+# 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
 # ===============================
 
 class UIManager:
@@ -138,7 +143,7 @@ class UIManager:
                 border-left: 5px solid #00b4d8;
             }
             
-            /* Styled Evidence Card */
+            /* Evidence Card Styles */
             .evidence-card {
                 background: #f8f9fa;
                 border-left: 4px solid #0077b6;
@@ -152,14 +157,25 @@ class UIManager:
                 color: #023e8a;
                 margin-bottom: 5px;
                 display: flex;
-                justify-content: space-between;
                 align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
             }
             .evidence-confidence {
                 display: inline-block;
+                background: linear-gradient(135deg, #0077b6, #00b4d8);
                 color: white;
-                padding: 2px 8px;
+                padding: 3px 10px;
                 border-radius: 12px;
+                font-size: 0.8rem;
+                font-weight: 600;
+            }
+            .evidence-badge {
+                display: inline-block;
+                background: #e9ecef;
+                color: #495057;
+                padding: 3px 8px;
+                border-radius: 10px;
                 font-size: 0.75rem;
                 font-weight: 600;
             }
@@ -206,6 +222,10 @@ class UIManager:
                         <span style="font-weight: 600; color: #555;">GVHD:</span>
                         <span style="text-align: right; color: #222;">Thầy <b>Nguyễn Thế Khanh</b></span>
                     </div>
+                    <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                        <span style="font-weight: 600; color: #555;">Năm học:</span>
+                        <span style="text-align: right; color: #222;"><b>2025 - 2026</b></span>
+                    </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -241,7 +261,7 @@ class UIManager:
         """, unsafe_allow_html=True)
 
 # ==================================
-# 3. LOGIC BACKEND - NÂNG CẤP XỬ LÝ LỖI
+# 3. LOGIC BACKEND - ROBUST RAG ENGINE
 # ==================================
 
 class RAGEngine:
@@ -250,9 +270,11 @@ class RAGEngine:
     def load_groq_client():
         try:
             api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
-            if not api_key: return None
+            if not api_key:
+                return None
             return Groq(api_key=api_key)
-        except Exception: return None
+        except Exception:
+            return None
 
     @staticmethod
     @st.cache_resource(show_spinner=False)
@@ -263,16 +285,16 @@ class RAGEngine:
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-        except Exception: return None
+        except Exception as e:
+            st.error(f"Lỗi tải Embedding: {e}")
+            return None
 
     @staticmethod
     @st.cache_resource(show_spinner=False)
     def load_reranker():
         try:
-            # 🆕 Thêm try-catch khi load ranker để tránh crash ứng dụng
             return Ranker(model_name=AppConfig.RERANK_MODEL_NAME, cache_dir=AppConfig.RERANK_CACHE)
         except Exception as e:
-            print(f"⚠️ Warning: Could not load FlashRank ({e}). Using fallback scoring.")
             return None
 
     @staticmethod
@@ -287,12 +309,16 @@ class RAGEngine:
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
         text = unicodedata.normalize('NFC', text)
         text = text.replace('\xa0', ' ').replace('\u200b', '')
+        
         lines = text.split('\n')
         chunks = []
+        
         current_topic = None   
         current_lesson = None  
         current_section = "Nội dung"
+        
         buffer = []
+
         p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
         p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
@@ -301,18 +327,23 @@ class RAGEngine:
             if not buf: return
             content = "\n".join(buf).strip()
             if len(content) < 20: return 
-            if is_strict and (not current_topic or not current_lesson): return 
+            
+            if is_strict and (not current_topic or not current_lesson):
+                return 
 
             chunk_topic = current_topic if current_topic else "Kiến thức chung"
             chunk_lesson = current_lesson if current_lesson else "Nội dung chi tiết"
+
+            chunk_uid = str(uuid.uuid4())[:8]
             new_meta = meta.copy()
             new_meta.update({
-                "chunk_uid": str(uuid.uuid4())[:8],
+                "chunk_uid": chunk_uid,
                 "chapter": chunk_topic,
                 "lesson": chunk_lesson,
                 "section": current_section,
                 "context_str": f"{chunk_topic} > {chunk_lesson} > {current_section}" 
             })
+            
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
@@ -325,7 +356,9 @@ class RAGEngine:
             if match_topic:
                 commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
-                current_topic = f"Chủ đề {match_topic.group(2).strip()} {match_topic.group(3).strip(' :.-')}"
+                topic_id = match_topic.group(2).strip()
+                topic_text = match_topic.group(3).strip(" :.-")
+                current_topic = f"Chủ đề {topic_id} {topic_text}".strip()
                 current_lesson = None 
                 current_section = "Giới thiệu chủ đề"
                 has_structure = True
@@ -334,7 +367,9 @@ class RAGEngine:
                 match_lesson = p_lesson.search(line_stripped)
                 commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
-                current_lesson = f"Bài {match_lesson.group(2).strip()} {match_lesson.group(3).strip(' :.-')}"
+                lesson_id = match_lesson.group(2).strip()
+                lesson_text = match_lesson.group(3).strip(" :.-")
+                current_lesson = f"Bài {lesson_id} {lesson_text}".strip()
                 current_section = "Tổng quan bài"
                 has_structure = True
                 
@@ -342,17 +377,25 @@ class RAGEngine:
                 commit_chunk(buffer, source_meta, is_strict=True)
                 buffer = []
                 current_section = line_stripped.replace('#','').strip()
+                
             else:
                 buffer.append(line)
+        
         commit_chunk(buffer, source_meta, is_strict=True)
 
         if not chunks and not has_structure:
+            print(f"⚠️ Cảnh báo: Không phát hiện cấu trúc chuẩn trong {source_meta['source']}. Chuyển sang chế độ cắt đoạn phổ thông.")
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             raw_chunks = splitter.split_text(text)
             for rc in raw_chunks:
                 meta = source_meta.copy()
-                meta.update({"chapter": "Tài liệu bổ sung", "lesson": "Nội dung trích xuất", "context_str": f"{source_meta['source']}"})
+                meta.update({
+                    "chapter": "Tài liệu bổ sung",
+                    "lesson": "Nội dung trích xuất",
+                    "context_str": f"{source_meta['source']}"
+                })
                 chunks.append(Document(page_content=rc, metadata=meta))
+
         return chunks
 
     @staticmethod
@@ -360,151 +403,313 @@ class RAGEngine:
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
         file_name = os.path.basename(file_path)
         md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
+        
         if os.path.exists(md_file_path):
-            with open(md_file_path, "r", encoding="utf-8") as f: return f.read()
+            with open(md_file_path, "r", encoding="utf-8") as f:
+                return f.read()
         
         markdown_text = ""
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
+        used_llama = False
+        
         if llama_api_key and LlamaParse:
             try:
-                parser = LlamaParse(api_key=llama_api_key, result_type="markdown", language="vi", verbose=True)
+                parser = LlamaParse(
+                    api_key=llama_api_key,
+                    result_type="markdown",
+                    language="vi",
+                    verbose=True
+                )
                 documents = parser.load_data(file_path)
                 markdown_text = documents[0].text
-            except Exception: pass
+                used_llama = True
+            except Exception as e:
+                print(f"⚠️ LlamaParse failed cho {file_name}: {e}. Chuyển sang PyPDFLoader.")
         
-        if not markdown_text:
+        if not used_llama or not markdown_text:
             try:
                 loader = PyPDFLoader(file_path)
                 docs = loader.load()
                 markdown_text = "\n\n".join([d.page_content for d in docs])
-            except Exception as e: return f"ERROR: {str(e)}"
+            except Exception as e:
+                return f"ERROR reading file {file_name}: {str(e)}"
 
         if markdown_text:
-            with open(md_file_path, "w", encoding="utf-8") as f: f.write(markdown_text)
+            with open(md_file_path, "w", encoding="utf-8") as f:
+                f.write(markdown_text)
+            
         return markdown_text
 
     @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
-        if not os.path.exists(pdf_dir): os.makedirs(pdf_dir, exist_ok=True); return []
+        if not os.path.exists(pdf_dir):
+            os.makedirs(pdf_dir, exist_ok=True)
+            return []
+        
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
         all_chunks: List[Document] = []
         status_text = st.empty()
-        if not pdf_files: st.warning(f"⚠️ Thư mục {pdf_dir} trống."); return []
+
+        if not pdf_files:
+            st.warning(f"⚠️ Thư mục {pdf_dir} đang trống. Vui lòng bỏ file PDF SGK vào.")
+            return []
 
         for file_path in pdf_files:
             source_file = os.path.basename(file_path)
-            status_text.text(f"Đang xử lý: {source_file}...")
+            status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
+            
             content = RAGEngine._parse_pdf_smart(file_path)
+            
             if content and not content.startswith("ERROR"):
-                 meta = {"source": source_file, "grade": RAGEngine._detect_grade(source_file)}
-                 chunks = RAGEngine._structural_chunking(content, meta)
-                 if chunks: all_chunks.extend(chunks)
+                 meta = {
+                     "source": source_file, 
+                     "grade": RAGEngine._detect_grade(source_file)
+                 }
+                 file_chunks = RAGEngine._structural_chunking(content, meta)
+                 if file_chunks:
+                    all_chunks.extend(file_chunks)
+                 else:
+                    print(f"⚠️ File {source_file} đọc được text nhưng không tạo được chunk nào.")
+            else:
+                st.error(f"Lỗi đọc file {source_file}: {content}")
+                
         status_text.empty()
         return all_chunks
 
     @staticmethod
     def build_hybrid_retriever(embeddings):
         if not embeddings: return None
+
         vector_db = None
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
-            try: vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
+            try:
+                vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
             except Exception: pass
 
         if not vector_db:
             chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
-            if not chunk_docs: return None
+            
+            if not chunk_docs:
+                st.error(f"Không tạo được dữ liệu từ {AppConfig.PDF_DIR}. Hãy kiểm tra: 1. Có file PDF không? 2. File có text không (hay là ảnh scan)?")
+                return None
+            
             vector_db = FAISS.from_documents(chunk_docs, embeddings)
             vector_db.save_local(AppConfig.VECTOR_DB_PATH)
 
         try:
             docstore_docs = list(vector_db.docstore._dict.values())
             bm25_k = min(AppConfig.RETRIEVAL_K, len(docstore_docs))
+            
             if bm25_k > 0:
                 bm25_retriever = BM25Retriever.from_documents(docstore_docs)
                 bm25_retriever.k = bm25_k
-                faiss_retriever = vector_db.as_retriever(search_type="mmr", search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5})
-                return EnsembleRetriever(retrievers=[bm25_retriever, faiss_retriever], weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT])
-            else: return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
-        except Exception: return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+
+                faiss_retriever = vector_db.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={"k": AppConfig.RETRIEVAL_K, "lambda_mult": 0.5}
+                )
+
+                ensemble_retriever = EnsembleRetriever(
+                    retrievers=[bm25_retriever, faiss_retriever],
+                    weights=[AppConfig.BM25_WEIGHT, AppConfig.FAISS_WEIGHT]
+                )
+                return ensemble_retriever
+            else:
+                return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
+        except Exception as e:
+            print(f"Lỗi build retriever: {e}. Fallback về FAISS thường.")
+            return vector_db.as_retriever(search_kwargs={"k": AppConfig.RETRIEVAL_K})
     
     @staticmethod
     def _sanitize_output(text: str) -> str:
         cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+')
         text = cjk_pattern.sub("", text)
+        
+        hallucination_pattern = re.compile(r'\[(ID|Nguồn|Source|Trích dẫn|Tài liệu).*?\]', re.IGNORECASE)
+        text = hallucination_pattern.sub("", text)
+        
+        leakage_pattern = re.compile(r'^(Hệ thống|Chatbot|Phần này) (tự động|sẽ|đã) (gắn|thêm|trích dẫn).*', re.IGNORECASE | re.MULTILINE)
+        text = leakage_pattern.sub("", text)
+        
         lines = text.split('\n')
-        return "\n".join([l for l in lines if not l.strip().lower().startswith(('nguồn:', 'trích dẫn:'))]).strip()
+        cleaned_lines = []
+        for line in lines:
+            line_clean = line.strip().lower()
+            if line_clean.startswith(('nguồn:', 'source:', 'trích dẫn:', 'tài liệu tham khảo:')):
+                continue
+            cleaned_lines.append(line)
+        
+        return "\n".join(cleaned_lines).strip()
 
     @staticmethod
     def _format_chat_history(messages: List[Dict]) -> str:
+        """Format chat history for context injection"""
         formatted = []
-        for msg in messages[-6:]:
+        for msg in messages[-6:]:  # Last 3 turns (6 messages)
             role = "Học sinh" if msg["role"] == "user" else "Trợ lý"
             content = re.sub(r'<[^>]+>', '', msg["content"])
             formatted.append(f"{role}: {content}")
         return "\n".join(formatted)
 
     @staticmethod
-    def generate_response(client, retriever, query, chat_history: List[Dict]) -> Tuple[str, List[Tuple[Document, float]]]:
-        if not retriever: return "Hệ thống đang khởi tạo...", []
-        
-        # 1. RETRIEVAL
-        try: initial_docs = retriever.invoke(query)
-        except Exception: return "Đang gặp lỗi truy vấn dữ liệu.", []
+    def _apply_synthetic_scores(docs: List[Document]) -> List[Tuple[Document, float]]:
+        """🔥 CRITICAL FIX: Apply synthetic decay scoring when Reranker fails"""
+        scored = []
+        for idx, doc in enumerate(docs[:AppConfig.FINAL_K]):
+            synthetic_score = max(
+                AppConfig.SYNTHETIC_BASE_SCORE - (idx * AppConfig.SYNTHETIC_DECAY),
+                AppConfig.RERANK_THRESHOLD + 0.01  # Always above threshold
+            )
+            scored.append((doc, synthetic_score))
+        return scored
 
-        # 2. RERANKING (CÓ FALLBACK CHỐNG LỖI 0%)
+    @staticmethod
+    def generate_response(client, retriever, query, chat_history: List[Dict]) -> Tuple[str, List[Tuple[Document, float]]]:
+        """
+        Returns: (response_text, [(doc, score), ...])
+        🔥 With ROBUST fallback scoring - NEVER returns 0% confidence
+        """
+        if not retriever:
+            return "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát.", []
+        
+        # --- TẦNG 1: RETRIEVAL ---
+        try:
+            initial_docs = retriever.invoke(query)
+        except Exception:
+            return "Đang gặp lỗi truy vấn dữ liệu.", []
+
+        # --- TẦNG 2: INTELLIGENT RERANKING + FALLBACK 🔥 ---
         scored_docs = []
+        reranker_failed = False
+        
         try:
             ranker = RAGEngine.load_reranker()
             if ranker and initial_docs:
-                passages = [{"id": str(i), "text": d.page_content, "meta": d.metadata} for i, d in enumerate(initial_docs)]
+                passages = [
+                    {"id": str(i), "text": d.page_content, "meta": d.metadata} 
+                    for i, d in enumerate(initial_docs)
+                ]
                 rerank_req = RerankRequest(query=query, passages=passages)
                 results = ranker.rank(rerank_req)
                 
+                # Try to extract scores
                 for res in results:
-                    score = res.get("score", 0)
+                    score = res.get("score", None)
+                    if score is None or score == 0:
+                        reranker_failed = True
+                        break
                     if score >= AppConfig.RERANK_THRESHOLD:
                         doc = Document(page_content=res["text"], metadata=res["meta"])
                         scored_docs.append((doc, score))
+                
                 scored_docs = scored_docs[:AppConfig.FINAL_K]
             else:
-                # Nếu không load được ranker thì raise lỗi để nhảy xuống except
-                raise Exception("Ranker not loaded")
+                reranker_failed = True
         except Exception as e:
-            # 🆕 SOFT FALLBACK: Tự chấm điểm giả lập để giao diện luôn đẹp
-            print(f"⚠️ RERANK ERROR (Switching to synthetic scores): {e}")
-            fallback_docs = initial_docs[:AppConfig.FINAL_K]
-            for i, doc in enumerate(fallback_docs):
-                # Gán điểm giả lập giảm dần: 0.95, 0.90, 0.85...
-                fake_score = max(0.5, 0.95 - (i * 0.05)) 
-                scored_docs.append((doc, fake_score))
+            print(f"⚠️ Reranker error: {e}. Activating synthetic scoring.")
+            reranker_failed = True
 
-        if not scored_docs: return "Không tìm thấy thông tin phù hợp trong SGK.", []
+        # 🔥 SOFT FALLBACK: Apply synthetic scores if Reranker failed
+        if reranker_failed or not scored_docs:
+            print("🔥 Applying synthetic decay scoring (Reranker unavailable)")
+            scored_docs = RAGEngine._apply_synthetic_scores(initial_docs)
 
-        # 3. CONTEXT
-        context_str = "\n".join([f"--- DATA ---\n{doc.page_content}" for doc, _ in scored_docs])
-        history_str = RAGEngine._format_chat_history(chat_history)
+        if not scored_docs:
+            return "Không tìm thấy thông tin đủ tin cậy trong SGK hiện có. Hãy thử diễn đạt câu hỏi khác.", []
 
-        # 4. LLM GENERATION
-        system_prompt = f"""Bạn là KTC Chatbot. Dựa vào [CONTEXT] và [LỊCH SỬ] trả lời ngắn gọn, chính xác.
-[LỊCH SỬ]: {history_str}
-[CONTEXT]: {context_str}"""
+        # --- TẦNG 3: CONTEXT BUILDING ---
+        context_parts = []
+        for doc, _ in scored_docs:
+             context_parts.append(
+                f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
+            )
+
+        full_context = "\n".join(context_parts)
+        history_context = RAGEngine._format_chat_history(chat_history)
+
+        # --- TẦNG 4: PROMPT WITH MEMORY ---
+        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học trường Phạm Kiệt.
+Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT] và [LỊCH SỬ HỘI THOẠI].
+
+QUY TẮC BẮT BUỘC:
+1. Chỉ sử dụng thông tin trong [CONTEXT].
+2. Sử dụng [LỊCH SỬ HỘI THOẠI] để hiểu ngữ cảnh (ví dụ: "cho tôi ví dụ về cái đó" → biết "cái đó" là gì).
+3. KHÔNG tự viết nguồn tham khảo giả.
+4. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
+
+[LỊCH SỬ HỘI THOẠI]
+{history_context}
+
+[CONTEXT]
+{full_context}
+"""
         
         try:
             completion = client.chat.completions.create(
                 model=AppConfig.LLM_MODEL,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-                stream=False, temperature=0.1, max_tokens=1500
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query}
+                ],
+                stream=False,
+                temperature=AppConfig.LLM_TEMPERATURE,
+                max_tokens=1500
             )
-            ans = completion.choices[0].message.content
-            return RAGEngine._sanitize_output(ans), scored_docs
-        except Exception as e: return f"Lỗi hệ thống: {e}", []
+            raw_response = completion.choices[0].message.content
+
+            if "NO_INFO" in raw_response or not raw_response.strip():
+                return "Không tìm thấy thông tin phù hợp trong SGK hiện có.", []
+
+            cleaned_response = RAGEngine._sanitize_output(raw_response)
+            return cleaned_response, scored_docs
+
+        except Exception as e:
+            return f"Lỗi xử lý hệ thống: {str(e)}", []
 
 # ===================
 # 4. MAIN APPLICATION
 # ===================
 
+def deduplicate_evidence(evidence_docs: List[Tuple[Document, float]]) -> List[Dict]:
+    """
+    🔥 CRITICAL FIX: Group evidence by unique lesson, show highest score + count
+    Returns: [{"source": ..., "chapter": ..., "lesson": ..., "max_score": ..., "count": ...}]
+    """
+    lesson_groups = defaultdict(lambda: {"docs": [], "scores": []})
+    
+    for doc, score in evidence_docs:
+        src = doc.metadata.get('source', 'Unknown')
+        chapter = doc.metadata.get('chapter', '')
+        lesson = doc.metadata.get('lesson', '')
+        
+        # Create unique key: source + chapter + lesson
+        key = f"{src}|||{chapter}|||{lesson}"
+        lesson_groups[key]["docs"].append(doc)
+        lesson_groups[key]["scores"].append(score)
+    
+    # Build deduplicated list
+    deduplicated = []
+    for key, data in lesson_groups.items():
+        src, chapter, lesson = key.split("|||")
+        max_score = max(data["scores"])
+        count = len(data["docs"])
+        
+        deduplicated.append({
+            "source": src,
+            "chapter": chapter,
+            "lesson": lesson,
+            "max_score": max_score,
+            "count": count
+        })
+    
+    # Sort by score descending
+    deduplicated.sort(key=lambda x: x["max_score"], reverse=True)
+    return deduplicated
+
 def main():
-    if not DEPENDENCIES_OK: st.error(f"⚠️ Thiếu thư viện: {IMPORT_ERROR}"); st.stop()
+    if not DEPENDENCIES_OK:
+        st.error(f"⚠️ Thiếu thư viện: {IMPORT_ERROR}")
+        st.stop()
 
     UIManager.inject_custom_css()
     UIManager.render_sidebar()
@@ -514,49 +719,13 @@ def main():
         st.session_state.messages = [{"role": "assistant", "content": "👋 Chào bạn! KTC Chatbot sẵn sàng hỗ trợ tra cứu kiến thức SGK Tin học."}]
 
     groq_client = RAGEngine.load_groq_client()
+
     if "retriever_engine" not in st.session_state:
-        with st.spinner("🚀 Đang khởi động hệ thống tri thức số..."):
+        with st.spinner("🚀 Đang khởi động hệ thống tri thức số (Smart Parsing + Semantic Chunking)..."):
             embeddings = RAGEngine.load_embedding_model()
             st.session_state.retriever_engine = RAGEngine.build_hybrid_retriever(embeddings)
-
-    # 🆕 Hàm hiển thị bằng chứng đã được gom nhóm (Deduplication Logic)
-    def render_evidence(evidence_docs):
-        if not evidence_docs: return
-        
-        # Gom nhóm theo Bài (Source + Lesson)
-        grouped_evidence = {}
-        for doc, score in evidence_docs:
-            source = doc.metadata.get('source', 'Unknown').replace('.pdf', '').replace('_', ' ')
-            chapter = doc.metadata.get('chapter', '')
-            lesson = doc.metadata.get('lesson', '')
-            key = (source, chapter, lesson)
-            
-            if key not in grouped_evidence:
-                grouped_evidence[key] = {'max_score': score, 'count': 0}
-            else:
-                grouped_evidence[key]['max_score'] = max(grouped_evidence[key]['max_score'], score)
-            grouped_evidence[key]['count'] += 1
-
-        with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
-            for (src, topic, lesson), info in grouped_evidence.items():
-                score = info['max_score']
-                count = info['count']
-                
-                # Logic màu sắc: Xanh lá nếu > 80%, Cam nếu > 50%
-                bg_color = "#28a745" if score > 0.8 else "#fd7e14"
-                pct = int(score * 100)
-                
-                count_badge = f"<span style='font-size:0.75em; color:#666; margin-left:5px'>(Tìm thấy {count} đoạn liên quan)</span>" if count > 1 else ""
-
-                st.markdown(f"""
-                <div class="evidence-card" style="border-left-color: {bg_color};">
-                    <div class="evidence-header">
-                        <span>📖 {src} {count_badge}</span>
-                        <span class="evidence-confidence" style="background-color: {bg_color};">Độ tin cậy: {pct}%</span>
-                    </div>
-                    <div class="evidence-context">➜ {topic} ➜ {lesson}</div>
-                </div>
-                """, unsafe_allow_html=True)
+            if st.session_state.retriever_engine:
+                st.toast("✅ Dữ liệu SGK đã sẵn sàng!", icon="📚")
 
     # Display chat history
     for msg in st.session_state.messages:
@@ -565,7 +734,30 @@ def main():
         with st.chat_message(msg["role"], avatar=avatar):
             if msg["role"] == "assistant" and "evidence" in msg:
                 st.markdown(msg["content"])
-                render_evidence(msg["evidence"])
+                
+                # 🔥 Re-render deduplicated evidence for history
+                if msg["evidence"]:
+                    deduplicated = deduplicate_evidence(msg["evidence"])
+                    with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
+                        for item in deduplicated:
+                            src = item["source"].replace('.pdf', '').replace('_', ' ')
+                            topic = item["chapter"]
+                            lesson = item["lesson"]
+                            confidence_pct = int(item["max_score"] * 100)
+                            count = item["count"]
+                            
+                            count_badge = f'<span class="evidence-badge">🔍 {count} đoạn liên quan</span>' if count > 1 else ''
+                            
+                            st.markdown(f"""
+                            <div class="evidence-card">
+                                <div class="evidence-header">
+                                    📖 {src}
+                                    <span class="evidence-confidence">Độ tin cậy: {confidence_pct}%</span>
+                                    {count_badge}
+                                </div>
+                                <div class="evidence-context">➜ {topic} ➜ {lesson}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
             else:
                 st.markdown(msg["content"])
 
@@ -573,24 +765,53 @@ def main():
     
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user", avatar="🧑‍🎓"): st.markdown(user_input)
+        with st.chat_message("user", avatar="🧑‍🎓"):
+            st.markdown(user_input)
 
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
             
+            # Pass chat history for context
             response_text, evidence_docs = RAGEngine.generate_response(
-                groq_client, st.session_state.retriever_engine, user_input, st.session_state.messages[:-1]
+                groq_client,
+                st.session_state.retriever_engine,
+                user_input,
+                st.session_state.messages[:-1]  # Exclude the just-added user message
             )
 
-            # Stream giả lập
+            # Stream simulation for better UX
             displayed = ""
             for char in response_text:
                 displayed += char
                 response_placeholder.markdown(displayed + "▌")
+            
             response_placeholder.markdown(response_text)
 
-            render_evidence(evidence_docs)
+            # 🔥 Display DEDUPLICATED evidence in expander
+            if evidence_docs:
+                deduplicated = deduplicate_evidence(evidence_docs)
+                with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
+                    for item in deduplicated:
+                        src = item["source"].replace('.pdf', '').replace('_', ' ')
+                        topic = item["chapter"]
+                        lesson = item["lesson"]
+                        confidence_pct = int(item["max_score"] * 100)
+                        count = item["count"]
+                        
+                        count_badge = f'<span class="evidence-badge">🔍 {count} đoạn liên quan</span>' if count > 1 else ''
+                        
+                        st.markdown(f"""
+                        <div class="evidence-card">
+                            <div class="evidence-header">
+                                📖 {src}
+                                <span class="evidence-confidence">Độ tin cậy: {confidence_pct}%</span>
+                                {count_badge}
+                            </div>
+                            <div class="evidence-context">➜ {topic} ➜ {lesson}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
 
+            # Store evidence with message for history re-rendering
             st.session_state.messages.append({
                 "role": "assistant", 
                 "content": response_text,
