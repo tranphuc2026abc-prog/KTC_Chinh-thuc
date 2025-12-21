@@ -42,6 +42,7 @@ except ImportError as e:
 # ==============================
 
 st.set_page_config(
+    page_title="SỞ GD & ĐT QUẢNG NGÃI",
     page_title="KTC Chatbot - THCS & THPT Phạm Kiệt",
     page_icon="LOGO.jpg",
     layout="wide",
