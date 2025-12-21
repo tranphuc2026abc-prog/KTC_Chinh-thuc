@@ -14,13 +14,12 @@ from typing import List, Tuple, Optional, Dict, Generator
 try:
     import nest_asyncio
     nest_asyncio.apply() 
-    # Ưu tiên LlamaParse, nếu không có sẽ dùng PyPDFLoader làm fallback
     try:
         from llama_parse import LlamaParse 
     except ImportError:
         LlamaParse = None
         
-    from langchain_community.document_loaders import PyPDFLoader # Fallback loader
+    from langchain_community.document_loaders import PyPDFLoader
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     from langchain_community.vectorstores import FAISS
     from langchain_community.retrievers import BM25Retriever
@@ -28,7 +27,6 @@ try:
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_core.documents import Document
     from groq import Groq
-    # Rerank optimization
     from flashrank import Ranker, RerankRequest
     DEPENDENCIES_OK = True
 except ImportError as e:
@@ -49,7 +47,6 @@ st.set_page_config(
 class AppConfig:
     # Model Config
     LLM_MODEL = 'llama-3.1-8b-instant'
-
     EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     RERANK_MODEL_NAME = "ms-marco-TinyBERT-L-2-v2"
 
@@ -65,7 +62,8 @@ class AppConfig:
 
     # RAG Parameters
     RETRIEVAL_K = 30       
-    FINAL_K = 5            
+    FINAL_K = 5
+    RERANK_THRESHOLD = 0.45  # 🆕 Score threshold for filtering low-quality results
     
     # Hybrid Search Weights
     BM25_WEIGHT = 0.4      
@@ -140,26 +138,35 @@ class UIManager:
                 border-left: 5px solid #00b4d8;
             }
             
-            /* Style cho phần Nguồn tham khảo footer */
-            .citation-footer {
-                margin-top: 15px;
-                padding-top: 10px;
-                border-top: 1px dashed #ced4da;
+            /* 🆕 Styled Evidence Card */
+            .evidence-card {
+                background: #f8f9fa;
+                border-left: 4px solid #0077b6;
+                padding: 12px 15px;
+                margin-bottom: 10px;
+                border-radius: 8px;
                 font-size: 0.9rem;
-                color: #495057;
             }
-            .citation-header {
+            .evidence-header {
                 font-weight: 700;
-                color: #d63384; 
+                color: #023e8a;
                 margin-bottom: 5px;
-                display: flex;
-                align-items: center;
-                gap: 5px;
             }
-            .citation-item {
-                margin-left: 5px;
-                margin-bottom: 3px;
-                display: block;
+            .evidence-confidence {
+                display: inline-block;
+                background: linear-gradient(135deg, #0077b6, #00b4d8);
+                color: white;
+                padding: 3px 10px;
+                border-radius: 12px;
+                font-size: 0.8rem;
+                font-weight: 600;
+                margin-left: 8px;
+            }
+            .evidence-context {
+                color: #495057;
+                font-size: 0.85rem;
+                margin-top: 5px;
+                font-style: italic;
             }
             
             div.stButton > button {
@@ -281,24 +288,20 @@ class RAGEngine:
         if "12" in filename: return "12"
         return "general"
 
-    # --- [MODIFIED] XỬ LÝ CHUNK THEO CẤU TRÚC KNTT (TOPIC -> LESSON) ---
     @staticmethod
     def _structural_chunking(text: str, source_meta: dict) -> List[Document]:
-        # 1. CLEANING
         text = unicodedata.normalize('NFC', text)
         text = text.replace('\xa0', ' ').replace('\u200b', '')
         
         lines = text.split('\n')
         chunks = []
         
-        # 2. STATE TRACKING
         current_topic = None   
         current_lesson = None  
         current_section = "Nội dung"
         
         buffer = []
 
-        # 3. REGEX ĐẶC THÙ CHO SGK KNTT
         p_topic = re.compile(r'(?:^|[\#\*\s]+)(CHỦ\s*ĐỀ)\s+([0-9A-Z]+)(.*)', re.IGNORECASE)
         p_lesson = re.compile(r'(?:^|[\#\*\s]+)(BÀI)\s+([0-9]+)(.*)', re.IGNORECASE)
         p_section = re.compile(r'^(###\s+|[IV0-9]+\.\s+|[a-z]\)\s+).*')
@@ -308,11 +311,9 @@ class RAGEngine:
             content = "\n".join(buf).strip()
             if len(content) < 20: return 
             
-            # Logic nghiêm ngặt: Phải có Bài/Chủ đề mới lưu
             if is_strict and (not current_topic or not current_lesson):
                 return 
 
-            # Logic fallback: Nếu không bắt được chủ đề, vẫn lưu dưới dạng General
             chunk_topic = current_topic if current_topic else "Kiến thức chung"
             chunk_lesson = current_lesson if current_lesson else "Nội dung chi tiết"
 
@@ -329,15 +330,11 @@ class RAGEngine:
             full_content = f"Context: {new_meta['context_str']}\nContent: {content}"
             chunks.append(Document(page_content=full_content, metadata=new_meta))
 
-        # --- QUÉT FILE ---
-        # print(f"--- Processing text length: {len(text)} ---") 
-        
         has_structure = False
         for line in lines:
             line_stripped = line.strip()
             if not line_stripped: continue
             
-            # 4. LOGIC PHÁT HIỆN CHỦ ĐỀ (TOPIC)
             match_topic = p_topic.search(line_stripped)
             if match_topic:
                 commit_chunk(buffer, source_meta, is_strict=True)
@@ -349,7 +346,6 @@ class RAGEngine:
                 current_section = "Giới thiệu chủ đề"
                 has_structure = True
             
-            # 5. LOGIC PHÁT HIỆN BÀI (LESSON)
             elif p_lesson.search(line_stripped):
                 match_lesson = p_lesson.search(line_stripped)
                 commit_chunk(buffer, source_meta, is_strict=True)
@@ -370,9 +366,6 @@ class RAGEngine:
         
         commit_chunk(buffer, source_meta, is_strict=True)
 
-        # --- FALLBACK MECHANISM ---
-        # Nếu quét cả file mà không thấy cấu trúc "Chủ đề/Bài" (do PDFLoader đọc kém), 
-        # chuyển sang cắt chunk thông thường để đảm bảo không mất dữ liệu.
         if not chunks and not has_structure:
             print(f"⚠️ Cảnh báo: Không phát hiện cấu trúc chuẩn trong {source_meta['source']}. Chuyển sang chế độ cắt đoạn phổ thông.")
             splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -390,21 +383,15 @@ class RAGEngine:
 
     @staticmethod
     def _parse_pdf_smart(file_path: str) -> str:
-        """
-        Hàm đọc PDF thông minh: Thử LlamaParse trước, nếu lỗi thì dùng PyPDFLoader (miễn phí, offline)
-        """
         os.makedirs(AppConfig.PROCESSED_MD_DIR, exist_ok=True)
         file_name = os.path.basename(file_path)
         md_file_path = os.path.join(AppConfig.PROCESSED_MD_DIR, f"{file_name}.md")
         
-        # 1. Kiểm tra Cache
         if os.path.exists(md_file_path):
             with open(md_file_path, "r", encoding="utf-8") as f:
                 return f.read()
         
         markdown_text = ""
-        
-        # 2. Thử dùng LlamaParse (Ưu tiên)
         llama_api_key = st.secrets.get("LLAMA_CLOUD_API_KEY")
         used_llama = False
         
@@ -422,17 +409,14 @@ class RAGEngine:
             except Exception as e:
                 print(f"⚠️ LlamaParse failed cho {file_name}: {e}. Chuyển sang PyPDFLoader.")
         
-        # 3. Fallback: Dùng PyPDFLoader (Nếu LlamaParse lỗi hoặc không có key)
         if not used_llama or not markdown_text:
             try:
                 loader = PyPDFLoader(file_path)
                 docs = loader.load()
-                # Nối text các trang lại
                 markdown_text = "\n\n".join([d.page_content for d in docs])
             except Exception as e:
                 return f"ERROR reading file {file_name}: {str(e)}"
 
-        # 4. Lưu Cache
         if markdown_text:
             with open(md_file_path, "w", encoding="utf-8") as f:
                 f.write(markdown_text)
@@ -442,7 +426,7 @@ class RAGEngine:
     @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
         if not os.path.exists(pdf_dir):
-            os.makedirs(pdf_dir, exist_ok=True) # Tự tạo thư mục nếu chưa có
+            os.makedirs(pdf_dir, exist_ok=True)
             return []
         
         pdf_files = glob.glob(os.path.join(pdf_dir, "*.pdf"))
@@ -457,7 +441,6 @@ class RAGEngine:
             source_file = os.path.basename(file_path)
             status_text.text(f"Đang xử lý cấu trúc tri thức: {source_file}...")
             
-            # Dùng hàm đọc thông minh mới
             content = RAGEngine._parse_pdf_smart(file_path)
             
             if content and not content.startswith("ERROR"):
@@ -481,13 +464,11 @@ class RAGEngine:
         if not embeddings: return None
 
         vector_db = None
-        # Kiểm tra DB cũ
         if os.path.exists(AppConfig.VECTOR_DB_PATH):
             try:
                 vector_db = FAISS.load_local(AppConfig.VECTOR_DB_PATH, embeddings, allow_dangerous_deserialization=True)
             except Exception: pass
 
-        # Nếu chưa có DB, tạo mới
         if not vector_db:
             chunk_docs = RAGEngine._read_and_process_files(AppConfig.PDF_DIR)
             
@@ -500,7 +481,6 @@ class RAGEngine:
 
         try:
             docstore_docs = list(vector_db.docstore._dict.values())
-            # Kiểm tra nếu ít document quá thì giảm k của BM25
             bm25_k = min(AppConfig.RETRIEVAL_K, len(docstore_docs))
             
             if bm25_k > 0:
@@ -545,19 +525,32 @@ class RAGEngine:
         return "\n".join(cleaned_lines).strip()
 
     @staticmethod
-    def generate_response(client, retriever, query) -> Generator[str, None, None]:
+    def _format_chat_history(messages: List[Dict]) -> str:
+        """🆕 Format chat history for context injection"""
+        formatted = []
+        for msg in messages[-6:]:  # Last 3 turns (6 messages)
+            role = "Học sinh" if msg["role"] == "user" else "Trợ lý"
+            # Strip HTML for cleaner context
+            content = re.sub(r'<[^>]+>', '', msg["content"])
+            formatted.append(f"{role}: {content}")
+        return "\n".join(formatted)
+
+    @staticmethod
+    def generate_response(client, retriever, query, chat_history: List[Dict]) -> Tuple[str, List[Tuple[Document, float]]]:
+        """
+        🆕 Returns: (response_text, [(doc, score), ...])
+        """
         if not retriever:
-            yield "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát."
-            return
+            return "Hệ thống đang khởi tạo hoặc lỗi dữ liệu... vui lòng chờ giây lát.", []
         
         # --- TẦNG 1: RETRIEVAL ---
         try:
             initial_docs = retriever.invoke(query)
         except Exception:
-            yield "Đang gặp lỗi truy vấn dữ liệu."
-            return
+            return "Đang gặp lỗi truy vấn dữ liệu.", []
 
-        final_docs = []
+        # --- TẦNG 2: RERANKING + FILTERING 🆕 ---
+        scored_docs = []
         try:
             ranker = RAGEngine.load_reranker()
             if ranker and initial_docs:
@@ -567,34 +560,51 @@ class RAGEngine:
                 ]
                 rerank_req = RerankRequest(query=query, passages=passages)
                 results = ranker.rank(rerank_req)
-                for res in results[:AppConfig.FINAL_K]:
-                    final_docs.append(Document(page_content=res["text"], metadata=res["meta"]))
+                
+                # 🆕 Apply score threshold
+                for res in results:
+                    score = res.get("score", 0)
+                    if score >= AppConfig.RERANK_THRESHOLD:
+                        doc = Document(page_content=res["text"], metadata=res["meta"])
+                        scored_docs.append((doc, score))
+                
+                # Take top K after filtering
+                scored_docs = scored_docs[:AppConfig.FINAL_K]
             else:
-                final_docs = initial_docs[:AppConfig.FINAL_K]
+                # Fallback without scores
+                for doc in initial_docs[:AppConfig.FINAL_K]:
+                    scored_docs.append((doc, 0.0))
         except Exception:
-            final_docs = initial_docs[:AppConfig.FINAL_K]
+            for doc in initial_docs[:AppConfig.FINAL_K]:
+                scored_docs.append((doc, 0.0))
 
-        if not final_docs:
-            yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
-            return
+        if not scored_docs:
+            return "Không tìm thấy thông tin đủ tin cậy trong SGK hiện có. Hãy thử diễn đạt câu hỏi khác.", []
 
-        # --- TẦNG 2: MAPPING REGISTRY ---
+        # --- TẦNG 3: CONTEXT BUILDING ---
         context_parts = []
-        for doc in final_docs:
+        for doc, _ in scored_docs:
              context_parts.append(
                 f"--- BEGIN DATA ---\n{doc.page_content}\n--- END DATA ---"
             )
 
         full_context = "\n".join(context_parts)
+        
+        # 🆕 Add conversational memory
+        history_context = RAGEngine._format_chat_history(chat_history)
 
-        # --- TẦNG 3: PROMPT ---
+        # --- TẦNG 4: PROMPT WITH MEMORY ---
         system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học trường Phạm Kiệt.
-Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT].
+Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT] và [LỊCH SỬ HỘI THOẠI].
 
 QUY TẮC BẮT BUỘC:
 1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. KHÔNG tự viết nguồn tham khảo giả.
-3. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
+2. Sử dụng [LỊCH SỬ HỘI THOẠI] để hiểu ngữ cảnh (ví dụ: "cho tôi ví dụ về cái đó" → biết "cái đó" là gì).
+3. KHÔNG tự viết nguồn tham khảo giả.
+4. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
+
+[LỊCH SỬ HỘI THOẠI]
+{history_context}
 
 [CONTEXT]
 {full_context}
@@ -614,43 +624,13 @@ QUY TẮC BẮT BUỘC:
             raw_response = completion.choices[0].message.content
 
             if "NO_INFO" in raw_response or not raw_response.strip():
-                yield "Không tìm thấy thông tin phù hợp trong SGK hiện có."
-                return
+                return "Không tìm thấy thông tin phù hợp trong SGK hiện có.", []
 
             cleaned_response = RAGEngine._sanitize_output(raw_response)
-            
-            # --- FIX RAG STRUCTURE: CITATION LOGIC ---
-            unique_sources = set()
-            for doc in final_docs:
-                src_raw = doc.metadata.get('source', '')
-                src_clean = src_raw.replace('.pdf', '').replace('_', ' ')
-                
-                topic = doc.metadata.get('chapter', '').strip()
-                lesson = doc.metadata.get('lesson', '').strip()
-                
-                if topic and lesson:
-                    display_str = f"📖 {src_clean} ➜ {topic} ➜ {lesson}"
-                    unique_sources.add(display_str)
-                elif src_clean:
-                    # Fallback citation for non-structured docs
-                    unique_sources.add(f"📖 {src_clean}")
-
-            sorted_sources = sorted(list(unique_sources))
-            
-            citation_html = ""
-            if sorted_sources:
-                citation_html += "\n\n<div class='citation-footer'>"
-                citation_html += "<div class='citation-header'>📚 Nguồn tham khảo xác thực (SGK KNTT):</div>"
-                for src in sorted_sources:
-                    citation_html += f"<span class='citation-item'>• {src}</span>"
-                citation_html += "</div>"
-            
-            final_response = cleaned_response + citation_html
-            
-            yield final_response
+            return cleaned_response, scored_docs
 
         except Exception as e:
-            yield f"Lỗi xử lý hệ thống: {str(e)}"
+            return f"Lỗi xử lý hệ thống: {str(e)}", []
 
 # ===================
 # 4. MAIN APPLICATION
@@ -677,11 +657,34 @@ def main():
             if st.session_state.retriever_engine:
                 st.toast("✅ Dữ liệu SGK đã sẵn sàng!", icon="📚")
 
+    # 🆕 Display chat history
     for msg in st.session_state.messages:
         bot_avatar = AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"
         avatar = "🧑‍🎓" if msg["role"] == "user" else bot_avatar
         with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"], unsafe_allow_html=True) 
+            # Check if message has evidence stored
+            if msg["role"] == "assistant" and "evidence" in msg:
+                st.markdown(msg["content"])
+                # 🆕 Re-render evidence expander for history
+                if msg["evidence"]:
+                    with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
+                        for i, (doc, score) in enumerate(msg["evidence"], 1):
+                            src = doc.metadata.get('source', 'Unknown').replace('.pdf', '').replace('_', ' ')
+                            topic = doc.metadata.get('chapter', '')
+                            lesson = doc.metadata.get('lesson', '')
+                            confidence_pct = int(score * 100) if score > 0 else 0
+                            
+                            st.markdown(f"""
+                            <div class="evidence-card">
+                                <div class="evidence-header">
+                                    📖 {src}
+                                    <span class="evidence-confidence">Độ tin cậy: {confidence_pct}%</span>
+                                </div>
+                                <div class="evidence-context">➜ {topic} ➜ {lesson}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+            else:
+                st.markdown(msg["content"])
 
     user_input = st.chat_input("Nhập câu hỏi học tập...")
     
@@ -693,20 +696,47 @@ def main():
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
             
-            response_gen = RAGEngine.generate_response(
+            # 🆕 Pass chat history for context
+            response_text, evidence_docs = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
-                user_input
+                user_input,
+                st.session_state.messages[:-1]  # Exclude the just-added user message
             )
 
-            full_response = ""
-            for chunk in response_gen:
-                full_response += chunk
-                response_placeholder.markdown(full_response + "▌", unsafe_allow_html=True)
+            # Stream simulation for better UX
+            displayed = ""
+            for char in response_text:
+                displayed += char
+                response_placeholder.markdown(displayed + "▌")
             
-            response_placeholder.markdown(full_response, unsafe_allow_html=True)
+            response_placeholder.markdown(response_text)
 
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            # 🆕 Display evidence in expander (outside message bubble)
+            if evidence_docs:
+                with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
+                    for i, (doc, score) in enumerate(evidence_docs, 1):
+                        src = doc.metadata.get('source', 'Unknown').replace('.pdf', '').replace('_', ' ')
+                        topic = doc.metadata.get('chapter', '')
+                        lesson = doc.metadata.get('lesson', '')
+                        confidence_pct = int(score * 100) if score > 0 else 0
+                        
+                        st.markdown(f"""
+                        <div class="evidence-card">
+                            <div class="evidence-header">
+                                📖 {src}
+                                <span class="evidence-confidence">Độ tin cậy: {confidence_pct}%</span>
+                            </div>
+                            <div class="evidence-context">➜ {topic} ➜ {lesson}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+            # 🆕 Store evidence with message for history re-rendering
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": response_text,
+                "evidence": evidence_docs
+            })
 
 if __name__ == "__main__":
     main()
