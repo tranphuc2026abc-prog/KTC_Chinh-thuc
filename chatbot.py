@@ -1,3 +1,4 @@
+from advanced_pdf_processor import process_pdf_advanced
 import os
 import glob
 import base64
