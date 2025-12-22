@@ -7,6 +7,7 @@ import pickle
 import re
 import uuid
 import unicodedata 
+import asyncio
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Generator
 from collections import defaultdict
@@ -32,6 +33,11 @@ try:
     from langchain_core.documents import Document
     from groq import Groq
     from flashrank import Ranker, RerankRequest
+    
+    # 🎤 AUDIO IMPORTS
+    import edge_tts
+    from streamlit_mic_recorder import mic_recorder
+    
     DEPENDENCIES_OK = True
 except ImportError as e:
     DEPENDENCIES_OK = False
@@ -58,7 +64,8 @@ class AppConfig:
     PDF_DIR = "PDF_KNOWLEDGE"
     VECTOR_DB_PATH = "faiss_db_index"
     RERANK_CACHE = "./opt"
-    PROCESSED_MD_DIR = "PROCESSED_MD" 
+    PROCESSED_MD_DIR = "PROCESSED_MD"
+    AUDIO_OUTPUT_DIR = "audio_responses"  # 🎤 NEW
 
     # Assets
     LOGO_PROJECT = "LOGO.jpg"
@@ -67,7 +74,7 @@ class AppConfig:
     # RAG Parameters
     RETRIEVAL_K = 30       
     FINAL_K = 5
-    RERANK_THRESHOLD = 0.45  # Score threshold for filtering
+    RERANK_THRESHOLD = 0.45
     
     # Synthetic Scoring (Fallback when Reranker fails)
     SYNTHETIC_BASE_SCORE = 0.95
@@ -77,7 +84,99 @@ class AppConfig:
     BM25_WEIGHT = 0.4      
     FAISS_WEIGHT = 0.6     
 
-    LLM_TEMPERATURE = 0.0 
+    LLM_TEMPERATURE = 0.0
+    
+    # 🎤 TTS Configuration
+    TTS_VOICE = "vi-VN-NamMinhNeural"  # Male Vietnamese voice
+    TTS_RATE = "+0%"  # Speech rate
+    TTS_VOLUME = "+0%"  # Volume
+
+# ===============================
+# 🎤 AUDIO PROCESSING MODULE
+# ===============================
+
+class AudioProcessor:
+    """Handles Speech-to-Text and Text-to-Speech operations"""
+    
+    @staticmethod
+    def setup_audio_directory():
+        """Create audio output directory if it doesn't exist"""
+        os.makedirs(AppConfig.AUDIO_OUTPUT_DIR, exist_ok=True)
+    
+    @staticmethod
+    def text_to_speech_sync(text: str, output_filename: str) -> str:
+        """
+        Convert text to speech using edge-tts synchronously.
+        Returns: path to generated audio file
+        """
+        try:
+            # Remove markdown formatting and HTML tags for cleaner speech
+            clean_text = re.sub(r'\*\*|__|\*|_', '', text)
+            clean_text = re.sub(r'<[^>]+>', '', clean_text)
+            clean_text = re.sub(r'\[.*?\]\(.*?\)', '', clean_text)  # Remove markdown links
+            
+            # Limit text length for reasonable audio duration (max ~500 words)
+            words = clean_text.split()
+            if len(words) > 500:
+                clean_text = ' '.join(words[:500]) + "..."
+            
+            output_path = os.path.join(AppConfig.AUDIO_OUTPUT_DIR, output_filename)
+            
+            # Run async edge-tts in sync context
+            async def generate_audio():
+                communicate = edge_tts.Communicate(
+                    clean_text,
+                    AppConfig.TTS_VOICE,
+                    rate=AppConfig.TTS_RATE,
+                    volume=AppConfig.TTS_VOLUME
+                )
+                await communicate.save(output_path)
+            
+            # Execute async function
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(generate_audio())
+            loop.close()
+            
+            return output_path
+            
+        except Exception as e:
+            print(f"❌ TTS Error: {e}")
+            return None
+    
+    @staticmethod
+    def speech_to_text(audio_bytes) -> Optional[str]:
+        """
+        Convert speech to text using speech_recognition.
+        Falls back to simple notification if recognition fails.
+        """
+        try:
+            import speech_recognition as sr
+            
+            # Save audio bytes to temporary WAV file
+            temp_audio = os.path.join(AppConfig.AUDIO_OUTPUT_DIR, "temp_recording.wav")
+            with open(temp_audio, "wb") as f:
+                f.write(audio_bytes)
+            
+            # Recognize speech
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(temp_audio) as source:
+                audio_data = recognizer.record(source)
+                text = recognizer.recognize_google(audio_data, language="vi-VN")
+            
+            # Cleanup
+            if os.path.exists(temp_audio):
+                os.remove(temp_audio)
+            
+            return text
+            
+        except ImportError:
+            st.warning("⚠️ Thư viện speech_recognition chưa được cài đặt. Chức năng STT tạm thời không khả dụng.")
+            return None
+        except Exception as e:
+            print(f"❌ STT Error: {e}")
+            st.error("🎤 Không thể nhận diện giọng nói. Vui lòng thử lại hoặc nhập văn bản.")
+            return None
 
 # ===============================
 # 2. XỬ LÝ GIAO DIỆN (UI MANAGER ) 
@@ -234,6 +333,25 @@ class UIManager:
             """, unsafe_allow_html=True)
             
             st.markdown("### ⚙️ Tiện ích")
+            
+            # 🎤 NEW: Voice Input Section
+            st.markdown("#### 🎤 Nhập bằng giọng nói")
+            audio_data = mic_recorder(
+                start_prompt="🎙️ Bắt đầu ghi âm",
+                stop_prompt="⏹️ Dừng ghi âm",
+                key="voice_recorder"
+            )
+            
+            if audio_data:
+                with st.spinner("🎧 Đang nhận diện giọng nói..."):
+                    transcribed_text = AudioProcessor.speech_to_text(audio_data['bytes'])
+                    if transcribed_text:
+                        st.session_state.voice_input = transcribed_text
+                        st.success(f"✅ Đã nhận: {transcribed_text[:100]}...")
+                        st.rerun()
+            
+            st.markdown("---")
+            
             if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
@@ -281,10 +399,9 @@ class AdvancedPDFProcessor:
         r'TIN\s+HỌC\s+\d+',
         r'CHƯƠNG\s+TRÌNH\s+GIÁO\s+DỤC',
         r'PHÂN\s+PHỐI\s+CHƯƠNG\s+TRÌNH',
-        r'^\s*\d+\s*$',  # Isolated page numbers
+        r'^\s*\d+\s*$',
     ]
     
-    # Structural patterns for Vietnamese textbooks
     TOPIC_PATTERN = re.compile(
         r'(?:^|\n)\s*CHỦ\s+ĐỀ\s+(\d+)[\.:\s]*(.*?)(?:\n|$)',
         re.IGNORECASE | re.MULTILINE
@@ -297,7 +414,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def normalize_text(text: str) -> str:
-        """Normalize Vietnamese text (NFC normalization, whitespace cleanup)."""
         text = unicodedata.normalize('NFC', text)
         text = text.replace('\xa0', ' ').replace('\u200b', '')
         text = re.sub(r'[ \t]+', ' ', text)
@@ -306,7 +422,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def is_noise(text: str) -> bool:
-        """Check if a text line is noise (header/footer/page number)."""
         text_clean = text.strip()
         
         if len(text_clean) < 3:
@@ -323,7 +438,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def extract_page_text(page) -> Tuple[str, List[str]]:
-        """Extract clean text from a PDF page, filtering noise."""
         text = page.get_text()
         text = AdvancedPDFProcessor.normalize_text(text)
         
@@ -340,7 +454,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def detect_topic(text: str) -> Optional[str]:
-        """Detect 'Chủ đề' (Topic/Chapter) from text."""
         match = AdvancedPDFProcessor.TOPIC_PATTERN.search(text)
         if match:
             topic_num = match.group(1).strip()
@@ -350,7 +463,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def detect_lesson(text: str) -> Optional[str]:
-        """Detect 'Bài' (Lesson) from text."""
         match = AdvancedPDFProcessor.LESSON_PATTERN.search(text)
         if match:
             lesson_num = match.group(1).strip()
@@ -360,7 +472,6 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def split_into_semantic_chunks(text: str, max_chunk_size: int = 1000) -> List[str]:
-        """Split text into semantic chunks respecting paragraph boundaries."""
         if len(text) <= max_chunk_size:
             return [text]
         
@@ -406,24 +517,10 @@ class AdvancedPDFProcessor:
     
     @staticmethod
     def process_pdf_advanced(pdf_path: str, chunk_size: int = 1000, overlap: int = 100) -> List[Document]:
-        """
-        🔥 MAIN PROCESSING FUNCTION: Extract PDF with context-aware hierarchical chunking.
-        
-        Algorithm:
-        1. Iterate through all PDF pages
-        2. Extract and clean text from each page
-        3. Maintain state machine for current topic/lesson context
-        4. Detect structural changes (new topic, new lesson)
-        5. Create chunks with proper metadata enrichment
-        
-        Returns:
-            List of LangChain Document objects with enriched metadata
-        """
         doc = fitz.open(pdf_path)
         source_name = os.path.basename(pdf_path)
         documents = []
         
-        # State machine variables
         current_topic = None
         current_lesson = None
         content_buffer = []
@@ -439,11 +536,9 @@ class AdvancedPDFProcessor:
             if not page_text.strip():
                 continue
             
-            # Detect structural changes on this page
             detected_topic = AdvancedPDFProcessor.detect_topic(page_text)
             detected_lesson = AdvancedPDFProcessor.detect_lesson(page_text)
             
-            # STATE TRANSITION: New Topic detected
             if detected_topic:
                 if content_buffer:
                     AdvancedPDFProcessor._commit_buffer_to_documents(
@@ -457,7 +552,6 @@ class AdvancedPDFProcessor:
                 buffer_page_start = page_num
                 print(f"  📌 Page {page_num + 1}: Detected {current_topic}")
             
-            # STATE TRANSITION: New Lesson detected
             if detected_lesson:
                 if content_buffer:
                     AdvancedPDFProcessor._commit_buffer_to_documents(
@@ -472,7 +566,6 @@ class AdvancedPDFProcessor:
             
             content_buffer.append({'text': page_text, 'page': page_num})
         
-        # Commit remaining buffer
         if content_buffer:
             AdvancedPDFProcessor._commit_buffer_to_documents(
                 documents, content_buffer, current_topic, current_lesson,
@@ -495,7 +588,6 @@ class AdvancedPDFProcessor:
         chunk_size: int,
         overlap: int
     ):
-        """Convert accumulated buffer into Document objects with metadata."""
         if not buffer:
             return
         
@@ -504,7 +596,6 @@ class AdvancedPDFProcessor:
         
         chunks = AdvancedPDFProcessor.split_into_semantic_chunks(full_text, chunk_size)
         
-        # Create overlapping chunks
         final_chunks = []
         for i, chunk in enumerate(chunks):
             if i > 0 and overlap > 0:
@@ -513,11 +604,10 @@ class AdvancedPDFProcessor:
                 chunk = overlap_text + '\n' + chunk
             final_chunks.append(chunk)
         
-        # Create Document objects
         for chunk_idx, chunk_text in enumerate(final_chunks):
             metadata = {
                 'source': source_name,
-                'page': representative_page + 1,  # 1-indexed
+                'page': representative_page + 1,
                 'chapter': topic if topic else 'Nội dung chung',
                 'lesson': lesson if lesson else 'Phần giới thiệu',
                 'chunk_index': chunk_idx,
@@ -575,16 +665,6 @@ class RAGEngine:
 
     @staticmethod
     def _read_and_process_files(pdf_dir: str) -> List[Document]:
-        """
-        🔥 UPGRADED: Uses advanced context-aware PDF processing.
-        
-        This method now directly calls AdvancedPDFProcessor which implements:
-        - Hierarchical structure detection (Chủ đề, Bài)
-        - State machine for context tracking
-        - Noise reduction (headers, footers, page numbers)
-        - Semantic chunking at paragraph boundaries
-        - Full metadata enrichment (chapter, lesson, page)
-        """
         if not os.path.exists(pdf_dir):
             os.makedirs(pdf_dir, exist_ok=True)
             return []
@@ -602,7 +682,6 @@ class RAGEngine:
             status_text.text(f"🧠 Đang xử lý cấu trúc tri thức nâng cao: {source_file}...")
             
             try:
-                # 🔥 Use advanced processor
                 file_chunks = AdvancedPDFProcessor.process_pdf_advanced(
                     pdf_path=file_path,
                     chunk_size=1000,
@@ -692,9 +771,8 @@ class RAGEngine:
 
     @staticmethod
     def _format_chat_history(messages: List[Dict]) -> str:
-        """Format chat history for context injection"""
         formatted = []
-        for msg in messages[-6:]:  # Last 3 turns (6 messages)
+        for msg in messages[-6:]:
             role = "Học sinh" if msg["role"] == "user" else "Trợ lý"
             content = re.sub(r'<[^>]+>', '', msg["content"])
             formatted.append(f"{role}: {content[:200]}")
@@ -705,7 +783,6 @@ class RAGEngine:
         if not client or not retriever:
             return "❌ Hệ thống chưa sẵn sàng. Vui lòng kiểm tra API Key và dữ liệu SGK.", []
 
-        # --- TẦNG 1: RETRIEVAL ---
         try:
             raw_docs = retriever.invoke(query)
             if not raw_docs:
@@ -713,7 +790,6 @@ class RAGEngine:
         except Exception as e:
             return f"Lỗi truy vấn dữ liệu: {str(e)}", []
 
-        # --- TẦNG 2: RERANKING ---
         reranker = RAGEngine.load_reranker()
         scored_docs = []
 
@@ -744,7 +820,6 @@ class RAGEngine:
         if not scored_docs:
             return "🔍 Không tìm thấy thông tin liên quan trong SGK.", []
 
-        # --- TẦNG 3: CONTEXT BUILDING ---
         context_parts = []
         for doc, _ in scored_docs:
              context_parts.append(
@@ -754,15 +829,20 @@ class RAGEngine:
         full_context = "\n".join(context_parts)
         history_context = RAGEngine._format_chat_history(chat_history)
 
-        # --- TẦNG 4: PROMPT WITH MEMORY ---
-        system_prompt = f"""Bạn là KTC Chatbot, trợ lý ảo AI hỗ trợ học tập Tin học trường Phạm Kiệt.
-Nhiệm vụ: Trả lời câu hỏi của học sinh dựa trên thông tin trong [CONTEXT] và [LỊCH SỬ HỘI THOẠI].
+        system_prompt = f"""Bạn là "KTC Chatbot" (Trợ lý KTC), sản phẩm AI hỗ trợ học tập Tin học tại trường THCS & THPT Phạm Kiệt.
+
+THÔNG TIN VỀ BẠN (CỰC KỲ QUAN TRỌNG - HÃY TRẢ LỜI CHÍNH XÁC KHI ĐƯỢC HỎI):
+- Nhóm tác giả thực hiện: Hai bạn học sinh Bùi Tá Tùng và Cao Sỹ Bảo Chung.
+- Giáo viên hướng dẫn (GVHD): Thầy Nguyễn Thế Khanh (Tổ trưởng Toán - Tin).
+- Mục đích: Sản phẩm tham dự cuộc thi Khoa học Kỹ thuật (KHKT) cấp Tỉnh năm học 2025 - 2026.
+- Nhiệm vụ: Giúp học sinh tra cứu kiến thức SGK, giải thích thuật ngữ và hỗ trợ lập trình.
 
 QUY TẮC BẮT BUỘC:
-1. Chỉ sử dụng thông tin trong [CONTEXT].
-2. Sử dụng [LỊCH SỬ HỘI THOẠI] để hiểu ngữ cảnh (ví dụ: "cho tôi ví dụ về cái đó" → biết "cái đó" là gì).
-3. KHÔNG tự viết nguồn tham khảo giả.
-4. Trả lời ngắn gọn, sư phạm, dễ hiểu cho học sinh phổ thông.
+1. Chỉ sử dụng thông tin trong [CONTEXT] để trả lời câu hỏi chuyên môn.
+2. Nếu hỏi về thông tin tác giả/dự án, hãy dùng thông tin ở trên để trả lời tự hào.
+3. Sử dụng [LỊCH SỬ HỘI THOẠI] để hiểu ngữ cảnh.
+4. KHÔNG tự viết nguồn tham khảo giả.
+5. Trả lời ngắn gọn, sư phạm, dễ hiểu, giọng điệu thân thiện, khích lệ.
 
 [LỊCH SỬ HỘI THOẠI]
 {history_context}
@@ -798,10 +878,6 @@ QUY TẮC BẮT BUỘC:
 # ===================
 
 def deduplicate_evidence(evidence_docs: List[Tuple[Document, float]]) -> List[Dict]:
-    """
-    🔥 CRITICAL FIX: Group evidence by unique lesson, show highest score + count
-    Returns: [{"source": ..., "chapter": ..., "lesson": ..., "max_score": ..., "count": ...}]
-    """
     lesson_groups = defaultdict(lambda: {"docs": [], "scores": []})
     
     for doc, score in evidence_docs:
@@ -809,12 +885,10 @@ def deduplicate_evidence(evidence_docs: List[Tuple[Document, float]]) -> List[Di
         chapter = doc.metadata.get('chapter', '')
         lesson = doc.metadata.get('lesson', '')
         
-        # Create unique key: source + chapter + lesson
         key = f"{src}|||{chapter}|||{lesson}"
         lesson_groups[key]["docs"].append(doc)
         lesson_groups[key]["scores"].append(score)
     
-    # Build deduplicated list
     deduplicated = []
     for key, data in lesson_groups.items():
         src, chapter, lesson = key.split("|||")
@@ -829,7 +903,6 @@ def deduplicate_evidence(evidence_docs: List[Tuple[Document, float]]) -> List[Di
             "count": count
         })
     
-    # Sort by score descending
     deduplicated.sort(key=lambda x: x["max_score"], reverse=True)
     return deduplicated
 
@@ -837,6 +910,9 @@ def main():
     if not DEPENDENCIES_OK:
         st.error(f"⚠️ Thiếu thư viện: {IMPORT_ERROR}")
         st.stop()
+
+    # 🎤 Setup audio directory
+    AudioProcessor.setup_audio_directory()
 
     UIManager.inject_custom_css()
     UIManager.render_sidebar()
@@ -862,7 +938,11 @@ def main():
             if msg["role"] == "assistant" and "evidence" in msg:
                 st.markdown(msg["content"])
                 
-                # 🔥 Re-render deduplicated evidence for history
+                # 🎤 Render audio player if exists
+                if "audio_path" in msg and msg["audio_path"] and os.path.exists(msg["audio_path"]):
+                    with open(msg["audio_path"], "rb") as audio_file:
+                        st.audio(audio_file.read(), format="audio/mp3")
+                
                 if msg["evidence"]:
                     deduplicated = deduplicate_evidence(msg["evidence"])
                     with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
@@ -888,7 +968,13 @@ def main():
             else:
                 st.markdown(msg["content"])
 
-    user_input = st.chat_input("Nhập câu hỏi học tập...")
+    # 🎤 Check for voice input from sidebar
+    user_input = None
+    if "voice_input" in st.session_state and st.session_state.voice_input:
+        user_input = st.session_state.voice_input
+        st.session_state.voice_input = None  # Clear after use
+    else:
+        user_input = st.chat_input("Nhập câu hỏi học tập...")
     
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
@@ -898,15 +984,14 @@ def main():
         with st.chat_message("assistant", avatar=AppConfig.LOGO_PROJECT if os.path.exists(AppConfig.LOGO_PROJECT) else "🤖"):
             response_placeholder = st.empty()
             
-            # Pass chat history for context
             response_text, evidence_docs = RAGEngine.generate_response(
                 groq_client,
                 st.session_state.retriever_engine,
                 user_input,
-                st.session_state.messages[:-1]  # Exclude the just-added user message
+                st.session_state.messages[:-1]
             )
 
-            # Stream simulation for better UX
+            # Stream simulation
             displayed = ""
             for char in response_text:
                 displayed += char
@@ -914,7 +999,18 @@ def main():
             
             response_placeholder.markdown(response_text)
 
-            # 🔥 Display DEDUPLICATED evidence in expander
+            # 🎤 Generate TTS audio
+            audio_path = None
+            with st.spinner("🔊 Đang tạo âm thanh..."):
+                audio_filename = f"response_{uuid.uuid4().hex[:8]}.mp3"
+                audio_path = AudioProcessor.text_to_speech_sync(response_text, audio_filename)
+            
+            # Display audio player
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, "rb") as audio_file:
+                    st.audio(audio_file.read(), format="audio/mp3")
+
+            # Display evidence
             if evidence_docs:
                 deduplicated = deduplicate_evidence(evidence_docs)
                 with st.expander("📚 Kiểm chứng nguồn gốc (Evidence)", expanded=False):
@@ -938,11 +1034,12 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
 
-            # Store evidence with message for history re-rendering
+            # Store message with audio path
             st.session_state.messages.append({
                 "role": "assistant", 
                 "content": response_text,
-                "evidence": evidence_docs
+                "evidence": evidence_docs,
+                "audio_path": audio_path
             })
 
 if __name__ == "__main__":

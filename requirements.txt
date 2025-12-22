@@ -1,19 +1,38 @@
-streamlit>=1.30.0
-rank_bm25>=0.2.2
+# --- Core Application ---
+streamlit>=1.40.0
+watchdog>=3.0.0
+nest_asyncio
+numpy<2.0.0
+
+# --- Multimodal (New Features) ---
+SpeechRecognition>=3.10.0
+gTTS>=2.5.0
+Pillow>=10.0.0
+
+# --- LLM & AI Clients ---
+groq>=0.4.0
 openai-whisper>=20231117
+
+# --- RAG & LangChain Ecosystem ---
 langchain>=0.1.0
 langchain-community>=0.0.20
 langchain-huggingface>=0.0.1
 langchain-text-splitters>=0.0.1
 langchain-groq
+
+# --- Vector Database & Retrieval ---
 faiss-cpu>=1.7.4
-sentence-transformers>=2.2.2
-transformers>=4.30.0
-groq>=0.4.0
 flashrank>=0.2.0
-watchdog>=3.0.0
-numpy<2.0.0
-llama-parse
-nest_asyncio
+rank_bm25>=0.2.2
+
+# --- Document Processing (PDF) ---
 pypdf
 pymupdf
+llama-parse
+
+# --- Deep Learning Models ---
+sentence-transformers>=2.2.2
+transformers>=4.30.0
+edge-tts==6.1.9
+streamlit-mic-recorder==0.0.6
+SpeechRecognition==3.10.0
