@@ -4,10 +4,17 @@ watchdog>=3.0.0
 nest_asyncio
 numpy<2.0.0
 
-# --- Multimodal (New Features) ---
-SpeechRecognition>=3.10.0
+# --- Multimodal (Audio & Image) ---
+# QUAN TRỌNG: Phải dùng SpeechRecognition bản mới nhất để fix lỗi 'aifc' trên Python 3.13
+SpeechRecognition>=3.11.0
 gTTS>=2.5.0
 Pillow>=10.0.0
+# Thư viện ghi âm cho Streamlit
+streamlit-mic-recorder>=0.0.8
+
+# --- TTS (Text-to-Speech) ---
+# Thư viện đọc giọng Nam (Microsoft Edge)
+edge-tts>=6.1.9
 
 # --- LLM & AI Clients ---
 groq>=0.4.0
@@ -30,9 +37,10 @@ pypdf
 pymupdf
 llama-parse
 
-# --- Deep Learning Models ---
+# --- Deep Learning Utilities ---
 sentence-transformers>=2.2.2
 transformers>=4.30.0
-edge-tts==6.1.9
-streamlit-mic-recorder==0.0.6
-SpeechRecognition==3.10.0
+
+# --- System Utils (Fix lỗi thiếu thư viện hệ thống) ---
+packaging
+requests
