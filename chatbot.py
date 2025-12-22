@@ -938,10 +938,22 @@ def main():
             if msg["role"] == "assistant" and "evidence" in msg:
                 st.markdown(msg["content"])
                 
-                # 🎤 Render audio player if exists
-                if "audio_path" in msg and msg["audio_path"] and os.path.exists(msg["audio_path"]):
-                    with open(msg["audio_path"], "rb") as audio_file:
-                        st.audio(audio_file.read(), format="audio/mp3")
+                # 🎤 Voice Input Section (Before chat display)
+    st.markdown("### 🎤 Hỏi bằng giọng nói")
+    audio_input = st.audio_input("🎙️ Nhấn để ghi âm câu hỏi")
+    
+    if audio_input:
+        with st.spinner("🎤 Đang nhận diện giọng nói..."):
+            audio_bytes = audio_input.read()
+            transcribed_text = VoiceProcessor.transcribe_audio(audio_bytes)
+            
+            if transcribed_text:
+                st.success(f"✅ Đã nhận diện: **{transcribed_text}**")
+                # Auto-process voice query
+                st.session_state.voice_query = transcribed_text
+            else:
+                st.error("❌ Không nhận diện được giọng nói. Vui lòng thử lại hoặc nói rõ hơn.")
+
                 
                 if msg["evidence"]:
                     deduplicated = deduplicate_evidence(msg["evidence"])
