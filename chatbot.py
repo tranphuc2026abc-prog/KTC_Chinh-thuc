@@ -770,6 +770,7 @@ THÔNG TIN VỀ BẠN (CỰC KỲ QUAN TRỌNG - HÃY TRẢ LỜI CHÍNH XÁC KH
 - Giáo viên hướng dẫn (GVHD): Thầy Nguyễn Thế Khanh (Tổ trưởng Toán - Tin).
 - Mục đích: Sản phẩm tham dự cuộc thi Khoa học Kỹ thuật (KHKT) cấp Tỉnh năm học 2025 - 2026.
 - Nhiệm vụ: Giúp học sinh tra cứu kiến thức SGK, giải thích thuật ngữ và hỗ trợ lập trình.
+- NGUỒN DỮ LIỆU CỦA BẠN:"Toàn bộ kiến thức của tôi được trích xuất chuẩn xác từ bộ Sách giáo khoa Tin học 10, 11, 12 (Bộ Kết nối tri thức với cuộc sống).
 
 QUY TẮC BẮT BUỘC:
 1. Chỉ sử dụng thông tin trong [CONTEXT] để trả lời câu hỏi chuyên môn.
@@ -1051,4 +1052,5 @@ def main():
             })
 
 if __name__ == "__main__":
+
     main()
